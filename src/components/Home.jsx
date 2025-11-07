@@ -2,6 +2,7 @@ import React, { useRef, useState } from "react";
 
 const WS_URL = "ws://localhost:8080/transcribe";
 
+// ---------- audio helpers ----------
 function floatTo16BitPCM(float32Array) {
   const buffer = new ArrayBuffer(float32Array.length * 2);
   const view = new DataView(buffer);
@@ -13,7 +14,6 @@ function floatTo16BitPCM(float32Array) {
   }
   return new Uint8Array(buffer);
 }
-
 function resampleBuffer(buffer, inputSampleRate, outSampleRate) {
   if (inputSampleRate === outSampleRate) return buffer;
   const ratio = inputSampleRate / outSampleRate;
@@ -28,11 +28,17 @@ function resampleBuffer(buffer, inputSampleRate, outSampleRate) {
   }
   return out;
 }
+function lastNWords(text, n = 100) {
+  const words = text.replace(/\s+/g, " ").trim().split(" ").filter(Boolean);
+  return words.slice(Math.max(0, words.length - n)).join(" ");
+}
 
-const Home = () => {
-  const [status, setStatus] = useState("idle"); // idle | connecting | connected | paused | error
+export default function Home() {
+  const [status, setStatus] = useState("idle");     // idle | connecting | connected | paused | error
   const [finalText, setFinalText] = useState("");
   const [partialText, setPartialText] = useState("");
+  const [aiAnswer, setAiAnswer] = useState("");
+  const [showTranscript, setShowTranscript] = useState(true);
 
   const wsRef = useRef(null);
   const mediaRef = useRef(null);
@@ -40,50 +46,41 @@ const Home = () => {
   const processorRef = useRef(null);
   const audioCtxRef = useRef(null);
   const inputRateRef = useRef(null);
-
   const lastPartialRef = useRef("");
-  const isPausedRef = useRef(false); // used inside onaudioprocess
+  const isPausedRef = useRef(false);
 
   const start = async () => {
     if (status === "connected" || status === "paused" || status === "connecting") return;
+    setFinalText(""); setPartialText(""); setAiAnswer(""); setStatus("connecting");
 
-    setFinalText("");
-    setPartialText("");
-    setStatus("connecting");
-
-    // 1) WebSocket
     const ws = new WebSocket(WS_URL);
     ws.binaryType = "arraybuffer";
     wsRef.current = ws;
-
     ws.onopen = () => setStatus("connected");
     ws.onclose = () => setStatus("idle");
     ws.onerror = () => setStatus("error");
-
     ws.onmessage = (ev) => {
       try {
         const msg = JSON.parse(ev.data);
-        if (msg.type !== "transcript") return;
-        const incoming = msg.transcript || "";
-        if (msg.isPartial) {
-          if (incoming === lastPartialRef.current) return;
-          lastPartialRef.current = incoming;
-          setPartialText(incoming);
-        } else {
-          if (incoming.trim()) {
-            setFinalText((prev) => prev + incoming + "\n");
+        if (msg.type === "transcript") {
+          const incoming = msg.transcript || "";
+          if (msg.isPartial) {
+            if (incoming === lastPartialRef.current) return;
+            lastPartialRef.current = incoming;
+            setPartialText(incoming);
+          } else {
+            if (incoming.trim()) setFinalText((p) => p + incoming + "\n");
+            setPartialText("");
+            lastPartialRef.current = "";
           }
-          setPartialText("");
-          lastPartialRef.current = "";
         }
+        if (msg.type === "ai_answer") setAiAnswer(msg.text || "");
       } catch {}
     };
 
-    // 2) Mic + Audio graph
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       mediaRef.current = stream;
-
       const AudioCtx = window.AudioContext || window.webkitAudioContext;
       const audioCtx = new AudioCtx();
       audioCtxRef.current = audioCtx;
@@ -96,10 +93,9 @@ const Home = () => {
       processorRef.current = processor;
 
       processor.onaudioprocess = (evt) => {
-        if (isPausedRef.current) return; // do not send mic while paused
+        if (isPausedRef.current) return;
         const sock = wsRef.current;
         if (!sock || sock.readyState !== WebSocket.OPEN) return;
-
         const input = evt.inputBuffer.getChannelData(0);
         const resampled = resampleBuffer(input, inputRateRef.current, 16000);
         const pcm16 = floatTo16BitPCM(resampled);
@@ -118,86 +114,92 @@ const Home = () => {
 
   const pause = async () => {
     if (status !== "connected") return;
-    isPausedRef.current = true; // stop sending mic frames
-    setStatus("paused");
-    // tell backend to inject silence to keep AWS stream alive
+    isPausedRef.current = true; setStatus("paused");
     try { wsRef.current?.send(JSON.stringify({ type: "pause" })); } catch {}
-    // optional: suspend audio context to stop pull & save CPU
-    try {
-      if (audioCtxRef.current?.state === "running") {
-        await audioCtxRef.current.suspend();
-      }
-    } catch {}
+    try { if (audioCtxRef.current?.state === "running") await audioCtxRef.current.suspend(); } catch {}
   };
-
   const resume = async () => {
     if (status !== "paused") return;
-    // resume audio context
-    try {
-      if (audioCtxRef.current?.state === "suspended") {
-        await audioCtxRef.current.resume();
-      }
-    } catch {}
-    isPausedRef.current = false;
-    setStatus("connected");
+    try { if (audioCtxRef.current?.state === "suspended") await audioCtxRef.current.resume(); } catch {}
+    isPausedRef.current = false; setStatus("connected");
     try { wsRef.current?.send(JSON.stringify({ type: "resume" })); } catch {}
   };
-
   const stop = async () => {
-    // stop mic/graph
     try {
-      if (processorRef.current) {
-        try { processorRef.current.disconnect(); } catch {}
-        processorRef.current.onaudioprocess = null;
-        processorRef.current = null;
-      }
-      if (sourceRef.current) {
-        try { sourceRef.current.disconnect(); } catch {}
-        sourceRef.current = null;
-      }
-      if (mediaRef.current) {
-        mediaRef.current.getTracks().forEach((t) => t.stop());
-        mediaRef.current = null;
-      }
-      if (audioCtxRef.current) {
-        try { await audioCtxRef.current.close(); } catch {}
-        audioCtxRef.current = null;
-      }
-    } finally {
-      isPausedRef.current = false;
-    }
-
-    // close WS
+      if (processorRef.current) { try { processorRef.current.disconnect(); } catch {}; processorRef.current.onaudioprocess = null; processorRef.current = null; }
+      if (sourceRef.current) { try { sourceRef.current.disconnect(); } catch {}; sourceRef.current = null; }
+      if (mediaRef.current) { mediaRef.current.getTracks().forEach(t => t.stop()); mediaRef.current = null; }
+      if (audioCtxRef.current) { try { await audioCtxRef.current.close(); } catch {}; audioCtxRef.current = null; }
+    } finally { isPausedRef.current = false; }
     const ws = wsRef.current;
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      try { ws.send(JSON.stringify({ type: "stop" })); } catch {}
-      try { ws.close(); } catch {}
-    }
-    wsRef.current = null;
-    setStatus("idle");
+    if (ws && ws.readyState === WebSocket.OPEN) { try { ws.send(JSON.stringify({ type: "stop" })); } catch {}; try { ws.close(); } catch {} }
+    wsRef.current = null; setStatus("idle");
   };
 
+  const askAI = () => {
+    const text = lastNWords(`${finalText} ${partialText}`, 100);
+    setAiAnswer("…thinking…");
+    try { wsRef.current?.send(JSON.stringify({ type: "ask_ai", text })); } catch (e) { console.error(e); }
+  };
+
+  const isRecording = status === "connected";
+  const isPaused = status === "paused";
+
   return (
-    <div style={{ padding: 16, fontFamily: "system-ui" }}>
-      <h3>Interview Helper</h3>
+    <div className="overlay-root">
+      <div className="window" role="group" aria-label="Voice overlay">
+        <div className="titlebar" title="Drag me" />
 
-      <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
-        <button onClick={start} disabled={status === "connecting" || status === "connected" || status === "paused"}>
-          Start
-        </button>
-        {status === "connected" && <button onClick={pause}>Pause</button>}
-        {status === "paused" && <button onClick={resume}>Resume</button>}
-        <button onClick={stop} disabled={status === "idle"}>Stop</button>
-        <span style={{ marginLeft: 12 }}>Status: {status}</span>
+        <div className="controls">
+          <div className="left-controls">
+            <button className="btn solid" onClick={start} disabled={status === "connecting" || isRecording || isPaused}>Start</button>
+            {isRecording && <button className="btn" onClick={pause}>Pause</button>}
+            {isPaused && <button className="btn" onClick={resume}>Resume</button>}
+            <button className="btn" onClick={stop} disabled={status === "idle"}>Stop</button>
+            <button className="btn" onClick={askAI} disabled={!finalText.trim() && !partialText.trim()}>Ask AI</button>
+            <span className={`status ${status}`}>{status}</span>
+          </div>
+          {/* tiny toggle to hide/show transcript */}
+          <button
+  className={`toggle ${showTranscript ? "on" : "off"}`}
+  onClick={() => setShowTranscript(s => !s)}
+  title={showTranscript ? "Hide transcript" : "Show transcript"}
+>
+  <span className="toggle-text">{showTranscript ? "User" : "Off"}</span>
+  <span className="knob"></span>
+</button>
+        </div>
+
+        {/* Grid must be allowed to shrink children so inner panes scroll */}
+        <div
+          className="panes"
+          style={{ gridTemplateColumns: showTranscript ? "minmax(220px, 33%) 1fr" : "1fr" }}
+        >
+          {showTranscript && (
+            <div className="pane">
+              <div className="pane-title">Transcript</div>
+              {/* This body scrolls when long */}
+              <div className="pane-body">
+                <pre className="pre-area">
+                  {finalText}
+                  {partialText && status !== "paused" && `${partialText} ▌`}
+                  {status === "paused" && "[Paused — not recording]"}
+                </pre>
+              </div>
+            </div>
+          )}
+
+          <div className="pane">
+            <div className="pane-title">AI Answer</div>
+            {/* This body also scrolls when long */}
+            <div className="pane-body">
+              <pre className="pre-area">
+                {aiAnswer || "Press Ask AI to get an answer based on the last 100 words."}
+              </pre>
+            </div>
+          </div>
+        </div>
       </div>
-
-      <pre style={{ whiteSpace: "pre-wrap", border: "1px solid #ddd", padding: 12, minHeight: 200 }}>
-        {finalText}
-        {partialText && status !== "paused" && `${partialText} ▌`}
-        {status === "paused" && "[Paused — not recording]"}
-      </pre>
     </div>
   );
-};
-
-export default Home;
+}

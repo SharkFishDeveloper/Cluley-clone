@@ -12,6 +12,17 @@ process.env.VITE_PUBLIC = VITE_DEV_SERVER_URL ? path.join(process.env.APP_ROOT, 
 let win;
 function createWindow() {
   win = new BrowserWindow({
+    width: 500,
+    height: 300,
+    // ✅ transparent, frameless, resizable
+    transparent: true,
+    frame: false,
+    resizable: true,
+    // Helps on Windows to keep normal resize edges
+    // (safe to keep on macOS too)
+    thickFrame: true,
+    // fully transparent background
+    backgroundColor: "#00000000",
     icon: path.join(process.env.VITE_PUBLIC, "electron-vite.svg"),
     webPreferences: {
       preload: path.join(__dirname$1, "preload.mjs")

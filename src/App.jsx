@@ -1,13 +1,13 @@
-import './App.css'
-import Home from './components/Home.jsx'
+import "./App.css";
+import Home from "./components/Home.jsx";
 
-function App() {
-
+export default function App() {
   return (
-    <>
-      <Home/>
-    </>
-  )
+    <div className="app-wrap">
+      {/* invisible draggable area (frameless window move) */}
+      <div className="title-drag drag" />
+      <div className="header" />
+      <Home />
+    </div>
+  );
 }
-
-export default App

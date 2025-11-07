@@ -28,24 +28,38 @@ let win: BrowserWindow | null
 
 function createWindow() {
   win = new BrowserWindow({
+    width: 500,
+    height: 300,
+
+    // ✅ transparent, frameless, resizable
+    transparent: true,
+    frame: false,
+    resizable: true,
+
+    // Helps on Windows to keep normal resize edges
+    // (safe to keep on macOS too)
+    thickFrame: true,
+
+    // fully transparent background
+    backgroundColor: '#00000000',
+
     icon: path.join(process.env.VITE_PUBLIC, 'electron-vite.svg'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.mjs'),
     },
-  })
+  });
 
-  // Test active push message to Renderer-process.
   win.webContents.on('did-finish-load', () => {
-    win?.webContents.send('main-process-message', (new Date).toLocaleString())
-  })
+    win?.webContents.send('main-process-message', (new Date()).toLocaleString());
+  });
 
   if (VITE_DEV_SERVER_URL) {
-    win.loadURL(VITE_DEV_SERVER_URL)
+    win.loadURL(VITE_DEV_SERVER_URL);
   } else {
-    // win.loadFile('dist/index.html')
-    win.loadFile(path.join(RENDERER_DIST, 'index.html'))
+    win.loadFile(path.join(RENDERER_DIST, 'index.html'));
   }
 }
+
 
 // Quit when all windows are closed, except on macOS. There, it's common
 // for applications and their menu bar to stay active until the user quits

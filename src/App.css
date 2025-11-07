@@ -1,42 +1,253 @@
-#root {
-  max-width: 1280px;
-  margin: 0 auto;
-  padding: 2rem;
-  text-align: center;
+/* ===================== YOUR EXISTING RULES (unchanged transparency) ===================== */
+/* Core container — no padding, no gap, no radius */
+.app-wrap {
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+  background: rgba(20,20,20,0.35);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  display: flex;
+  flex-direction: column;
 }
 
-.logo {
-  height: 6em;
-  padding: 1.5em;
-  will-change: filter;
-  transition: filter 300ms;
-}
-.logo:hover {
-  filter: drop-shadow(0 0 2em #646cffaa);
-}
-.logo.react:hover {
-  filter: drop-shadow(0 0 2em #61dafbaa);
+/* Draggable strip */
+.title-drag {
+  height: 10px;
+  -webkit-app-region: drag;
+  opacity: 0.01;
+  margin: 0; /* no spacing */
 }
 
-@keyframes logo-spin {
-  from {
-    transform: rotate(0deg);
-  }
-  to {
-    transform: rotate(360deg);
-  }
+/* Header — zero spacing */
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 0;
+  padding: 0;
 }
 
-@media (prefers-reduced-motion: no-preference) {
-  a:nth-of-type(2) .logo {
-    animation: logo-spin infinite 20s linear;
-  }
+/* Remove text padding */
+.title {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 0;
 }
 
+.badge {
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  border: 1px solid rgba(255,255,255,0.25);
+  background: rgba(255,255,255,0.05);
+  margin: 0;
+}
+
+/* Buttons: no extra padding, no transitions */
+.btn {
+  -webkit-app-region: no-drag;
+  appearance: none;
+  border: 1px solid rgba(255,255,255,0.25);
+  background: rgba(255,255,255,0.07);
+  color: #fff;
+  padding: 4px 8px; /* reduced */
+  font-size: 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: none !important;
+}
+.btn:active, .btn:hover {
+  background: rgba(255,255,255,0.07) !important;
+}
+.btn.primary {
+  background: rgba(59,130,246,.25);
+}
+
+/* Layout grid — tighter */
+.grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+}
+
+/* Card — no shadows, minimal padding */
 .card {
-  padding: 2em;
+  border: 1px solid rgba(255,255,255,0.25);
+  background: rgba(255,255,255,0.06);
+  border-radius: 6px;
+  padding: 6px;
+  min-height: 100px;
+  display: flex;
+  flex-direction: column;
+  box-shadow: none !important;
 }
 
-.read-the-docs {
-  color: #888;
+.card h4 {
+  font-size: 11px;
+  font-weight: 500;
+  margin: 0 0 4px 0;
+  color: #ccc;
 }
+
+/* Text body */
+.pre {
+  margin: 0;
+  padding: 0;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.35;
+  max-height: 200px;
+  overflow: auto;
+  color: #fff;
+}
+
+/* ===================== ADDITIONS FOR SCROLLABLE PANES & NO-OVERFLOW ===================== */
+
+/* Root overlay fills available space without adding opacity changes */
+.overlay-root {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0; /* allow internal scroll areas */
+  display: flex;
+  flex-direction: column;
+}
+
+/* Main window is transparent; let app-wrap provide the backdrop and blur */
+.window {
+  display: grid;
+  grid-template-rows: 6px auto 1fr;
+  height: 100%;
+  min-height: 0;
+  width: 100%;
+  gap: 6px;
+  background: transparent;  /* keep transparency behavior */
+  border: 0;               /* no extra borders */
+  border-radius: 0;
+}
+
+/* tiny, draggable strip (already handled by title-drag but we mirror here) */
+.titlebar { -webkit-app-region: drag; }
+
+/* Controls row */
+.controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 0;
+  min-height: 0;
+}
+.left-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.status {
+  font-size: 11px;
+  opacity: .85;
+  text-transform: lowercase;
+}
+
+/* Small toggle switch */
+.toggle {
+  -webkit-app-region: no-drag;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px; /* space between label & knob */
+  padding: 4px 8px;
+  border-radius: 20px;
+  border: 1px solid rgba(255,255,255,0.25);
+  background: rgba(255,255,255,0.07);
+  cursor: pointer;
+  font-size: 12px;
+  user-select: none;
+}
+
+/* Text */
+.toggle-text {
+  color: #eaeaea;
+  font-size: 12px;
+}
+
+/* Knob (always right) */
+.knob {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  transition: background 0.2s ease, transform 0.2s ease;
+  background: rgba(255,255,255,0.5);
+}
+
+/* Active (transcript visible) */
+.toggle.on .knob {
+  background: #ffffff;
+}
+
+/* Subtle fade when OFF */
+.toggle.off .toggle-text {
+  opacity: 0.65;
+}
+
+/* Panes: grid that can shrink so inner bodies scroll */
+.panes {
+  display: grid;
+  grid-auto-rows: 1fr;
+  gap: 6px;
+  min-height: 0;  /* critical: lets children use overflow */
+  height: 100%;
+}
+
+/* Each pane uses the same transparent style language as your .card */
+.pane {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  min-height: 0; /* enable inner scrolling */
+  border: 1px solid rgba(255,255,255,0.25);
+  background: rgba(255,255,255,0.06);
+  border-radius: 6px;
+}
+
+.pane-title {
+  padding: 6px 8px;
+  font-size: 12px;
+  color: #ccc;
+  border-bottom: 1px solid rgba(255,255,255,0.12);
+  margin: 0;
+}
+
+/* Scrollable content area for both sections */
+.pane-body {
+  padding: 6px 8px;
+  overflow: auto;     /* <-- scrolling happens here */
+  min-height: 0;      /* required for nested scroll */
+}
+
+/* Pre styles inside panes (wrap long words & allow scrolling) */
+.pre-area {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.35;
+  color: #fff;
+}
+
+/* Make sure the whole app can scroll vertically if needed on small windows */
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  overflow: hidden; /* keep outer clean; panes scroll internally */
+}
+
+/* .toggle-label {
+  padding-left: 10px;
+} */
