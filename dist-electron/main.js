@@ -17,6 +17,7 @@ function createWindow() {
     transparent: true,
     frame: false,
     resizable: true,
+    titleBarStyle: "hidden",
     thickFrame: true,
     backgroundColor: "#00000000",
     alwaysOnTop: true,
