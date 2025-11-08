@@ -17,8 +17,6 @@ electron.contextBridge.exposeInMainWorld("ipcRenderer", {
     const [channel, ...omit] = args;
     return electron.ipcRenderer.invoke(channel, ...omit);
   }
-  // You can expose other APTs you need here.
-  // ...
 });
 electron.contextBridge.exposeInMainWorld("electronAPI", {
   getUnderlayCropInfo: () => electron.ipcRenderer.invoke("get-underlay-crop-info")

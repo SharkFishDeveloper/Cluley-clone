@@ -1,6 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
 
-// --------- Expose some API to the Renderer process ---------
 contextBridge.exposeInMainWorld('ipcRenderer', {
   on(...args: Parameters<typeof ipcRenderer.on>) {
     const [channel, listener] = args
@@ -18,17 +17,7 @@ contextBridge.exposeInMainWorld('ipcRenderer', {
     const [channel, ...omit] = args
     return ipcRenderer.invoke(channel, ...omit)
   },
-  
-  // You can expose other APTs you need here.
-  // ...
 })
-//2
-// contextBridge.exposeInMainWorld("electronAPI", {
-//   captureLeftOfOverlay: async (): Promise<{ ok: boolean; dataUrl?: string; error?: string }> =>
-//     ipcRenderer.invoke("capture-left-of-overlay"),
-//   getOverlayBounds: async () => ipcRenderer.invoke("get-overlay-bounds"),
-// });
-
 contextBridge.exposeInMainWorld("electronAPI", {
   getUnderlayCropInfo: () => ipcRenderer.invoke("get-underlay-crop-info"),
 });

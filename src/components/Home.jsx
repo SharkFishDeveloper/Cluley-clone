@@ -43,7 +43,12 @@ export default function Home() {
 
   const [shots, setShots] = useState([]);
   const overlayRef = useRef(null);
+
+  // OCR state
   const [ocrBusy, setOcrBusy] = useState(false);
+  const ocrAbortRef = useRef(null);        // AbortController
+  const ocrCanceledRef = useRef(false);    // flag to ignore late results
+  const ocrTimerRef = useRef(null);        // optional "taking too long" timer
 
   const wsRef = useRef(null);
   const mediaRef = useRef(null);
@@ -185,8 +190,8 @@ export default function Home() {
       );
 
       stream.getTracks().forEach((t) => t.stop());
-      const dataUrl = canvas.toDataURL("image/png");
-      setShots((prev) => [dataUrl, ...prev]);
+      const dataUrl = canvas.toDataURL("image/jpeg", 0.7); 
+    setShots(prev => [dataUrl, ...prev]);
 
       const el = overlayRef.current;
       if (el) {
@@ -199,23 +204,64 @@ export default function Home() {
     }
   };
 
+  // ---------- OCR with Cancel ----------
+  const cancelOcr = () => {
+  if (!ocrBusy) return;
+  ocrCanceledRef.current = true;
+  try { ocrAbortRef.current?.abort(); } catch {}
+  if (ocrTimerRef.current) { clearTimeout(ocrTimerRef.current); ocrTimerRef.current = null; }
+  setOcrBusy(false);
+  setFinalText(p => p + (p.endsWith("\n") ? "" : "\n") + "[OCR canceled]\n");
+};
+
+const ocrCurrentImage = async () => {
+  if (ocrBusy) return;
+  if (!shots[0]) {
+    setFinalText(p => p + (p.endsWith("\n") ? "" : "\n") + "[No screenshot to OCR]\n");
+    return;
+  }
+
+  setOcrBusy(true);
+  ocrCanceledRef.current = false;
+
+  const controller = new AbortController();
+  ocrAbortRef.current = controller;
+
+  // Hard timeout (e.g., 25s) -> abort
+  ocrTimerRef.current = setTimeout(() => {
+    if (!ocrCanceledRef.current) {
+      try { controller.abort(); } catch {}
+    }
+  }, 25000);
+
+  try {
+    // Always pass options; extra arg is ignored if unused
+    const text = await ocrImageDataUrl(shots[0], { signal: controller.signal });
+
+    if (ocrCanceledRef.current) return; // ignore late result after cancel
+    const stamped = text ? text : "[OCR returned empty text]";
+    setFinalText(p =>
+      p + (p.endsWith("\n") ? "" : "\n") + "Screenshot of problem\n" + stamped + "\n"
+    );
+  } catch (err) {
+    if (ocrCanceledRef.current || err?.name === "AbortError") {
+      // canceled/aborted: already messaged in cancelOcr or via timeout
+      setFinalText(p => p + (p.endsWith("\n") ? "" : "\n") + "[OCR aborted]\n");
+    } else {
+      console.error(err);
+      setFinalText(p =>
+        p + (p.endsWith("\n") ? "" : "\n") + "[OCR FAILED] " + (err?.message || "Unknown error") + "\n"
+      );
+    }
+  } finally {
+    if (ocrTimerRef.current) { clearTimeout(ocrTimerRef.current); ocrTimerRef.current = null; }
+    ocrAbortRef.current = null;
+    setOcrBusy(false);
+  }
+};
+
   const clearImage = () => setShots((prev) => prev.slice(1));
   const clearHistory = () => { setFinalText(""); setPartialText(""); };
-
-  const ocrCurrentImage = async () => {
-    if (!shots[0] || ocrBusy) return;
-    setOcrBusy(true);
-    try {
-      const text = await ocrImageDataUrl(shots[0]);
-      const stamped = text ? text : "[OCR returned empty text]";
-      setFinalText((p) => p + (p.endsWith("\n") ? "" : "\n") + "Screenshot of problem\n" + stamped + "\n");
-    } catch (err) {
-      console.error(err);
-      setFinalText((p) => p + (p.endsWith("\n") ? "" : "\n") + "[OCR FAILED] " + (err?.message || "Unknown error") + "\n");
-    } finally {
-      setOcrBusy(false);
-    }
-  };
 
   const isRecording = status === "connected";
   const isPaused = status === "paused";
@@ -239,7 +285,7 @@ export default function Home() {
         WebkitUserSelect: "none",
         userSelect: "none",
         cursor: "default"
-        // IMPORTANT: no WebkitAppRegion here
+        // NOTE: no WebkitAppRegion here; only your pill should be draggable
       }}
     >
       {/* DRAG PILL — the ONLY drag region */}
@@ -272,50 +318,66 @@ export default function Home() {
         }}
       >
         <div className="left-controls" style={{ display: "flex", gap: 6, flexWrap: "wrap", margin: 0 }}>
-          <button className="btn solid" style={{ cursor: "default", margin: 0 }} onClick={start} disabled={status === "connecting" || isRecording || isPaused}>
-            Start
-          </button>
-          {isRecording && (
-            <button className="btn" style={{ cursor: "default", margin: 0 }} onClick={pause}>
-              Pause
-            </button>
-          )}
-          {isPaused && (
-            <button className="btn" style={{ cursor: "default", margin: 0 }} onClick={resume}>
-              Resume
-            </button>
-          )}
-          <button className="btn" style={{ cursor: "default", margin: 0 }} onClick={stop} disabled={status === "idle"}>
-            Stop
-          </button>
-          <button className="btn" style={{ cursor: "default", margin: 0 }} onClick={askAI} disabled={!finalText.trim() && !partialText.trim()}>
-            Ask AI
-          </button>
-          <button className="btn" style={{ cursor: "default", margin: 0 }} onClick={captureUnderOverlay}>
-            Capture Under
-          </button>
-          <button className="btn" style={{ cursor: "default", margin: 0 }} onClick={ocrCurrentImage} disabled={!shots[0] || ocrBusy}>
-            {ocrBusy ? "OCR…" : "OCR Image"}
-          </button>
-          <button className="btn" style={{ cursor: "default", margin: 0 }} onClick={clearImage} disabled={!shots[0]}>
-            Clear Image
-          </button>
-          <button className="btn" style={{ cursor: "default", margin: 0 }} onClick={clearHistory} disabled={!finalText && !partialText}>
-            Clear History
-          </button>
-          <span className="status" style={{ fontSize: 10, display: "flex", alignItems: "center", margin: 0 }}>
-            {status.charAt(0).toUpperCase() + status.slice(1, 5)}
-          </span>
-        </div>
+  <button className="btn solid" style={{ cursor: "default", margin: 0 }} onClick={start} disabled={status === "connecting" || isRecording || isPaused}>
+    Start
+  </button>
 
-       <button
-  className={`toggle ${showTranscript ? "on" : "off"}`}
-  style={{ cursor: "default", marginTop: 28 }}   // ← add margin here
-  onClick={() => setShowTranscript(s => !s)}
-  title=""
->
-  {showTranscript ? "User" : "Off"}
-</button>
+  {isRecording && (
+    <button className="btn" style={{ cursor: "default", margin: 0 }} onClick={pause}>
+      Pause
+    </button>
+  )}
+  {isPaused && (
+    <button className="btn" style={{ cursor: "default", margin: 0 }} onClick={resume}>
+      Resume
+    </button>
+  )}
+
+  <button className="btn" style={{ cursor: "default", margin: 0 }} onClick={stop} disabled={status === "idle"}>
+    Stop
+  </button>
+
+  <button className="btn" style={{ cursor: "default", margin: 0 }} onClick={askAI} disabled={!finalText.trim() && !partialText.trim()}>
+    Ask AI
+  </button>
+
+  {/* ✅ Restore Capture Under */}
+  <button className="btn" style={{ cursor: "default", margin: 0 }} onClick={captureUnderOverlay}>
+    Capture Under
+  </button>
+
+  {/* OCR + Cancel OCR */}
+  <button className="btn" style={{ cursor: "default", margin: 0 }} onClick={ocrCurrentImage} disabled={!shots[0] || ocrBusy}>
+    {ocrBusy ? "OCR…" : "OCR Image"}
+  </button>
+
+  {ocrBusy && (
+    <button className="btn" style={{ cursor: "default", margin: 0 }} onClick={cancelOcr}>
+      Cancel OCR
+    </button>
+  )}
+
+  <button className="btn" style={{ cursor: "default", margin: 0 }} onClick={clearImage} disabled={!shots[0]}>
+    Clear Image
+  </button>
+
+  <button className="btn" style={{ cursor: "default", margin: 0 }} onClick={clearHistory} disabled={!finalText && !partialText}>
+    Clear History
+  </button>
+
+  <span className="status" style={{ fontSize: 10, display: "flex", alignItems: "center", margin: 0 }}>
+    {status.charAt(0).toUpperCase() + status.slice(1, 5)}
+  </span>
+</div>
+
+        <button
+          className={`toggle ${showTranscript ? "on" : "off"}`}
+          style={{ cursor: "default", margin: 0 }}
+          onClick={() => setShowTranscript(s => !s)}
+          title=""
+        >
+          {showTranscript ? "User" : "Off"}
+        </button>
       </div>
 
       {/* PANES */}
@@ -342,7 +404,11 @@ export default function Home() {
               </pre>
               {shots[0] && (
                 <div style={{ marginTop: 6 }}>
-                  <img src={shots[0]} alt="underlay capture" style={{ width: "100%", borderRadius: 6, display: "block", pointerEvents: "none" }} />
+                  <img
+                    src={shots[0]}
+                    alt="underlay capture"
+                    style={{ width: "100%", borderRadius: 6, display: "block", pointerEvents: "none" }}
+                  />
                 </div>
               )}
             </div>
@@ -353,7 +419,7 @@ export default function Home() {
           <div className="pane-title" style={{ padding: 4, margin: 0 }}>AI Answer</div>
           <div className="pane-body" style={{ overflow: "auto", padding: 4, margin: 0 }}>
             <pre className="pre-area" style={{ whiteSpace: "pre-wrap", margin: 0 }}>
-              {aiAnswer || "Press Ask "}
+              {aiAnswer || "Press Ask AI to get an answer based on the last 100 words."}
             </pre>
           </div>
         </div>

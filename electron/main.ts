@@ -60,64 +60,6 @@ app.on('activate', () => {
 })
 // ---------------------------------------------------------------------
 
-// ——— Utils ———
-// 2
-// function pickScreenSourceForDisplayId(
-//   sources: Electron.DesktopCapturerSource[],
-//   displayId: number
-// ) {
-//   // Electron varies: sometimes display_id is "123456789", sometimes id like "screen:123456789"
-//   const strId = String(displayId);
-//   return (
-//     sources.find((s) => s.display_id === strId) ||
-//     sources.find((s) => s.id.endsWith(`:${strId}`)) ||
-//     sources[0]
-//   );
-// }
-
-// // ——— IPC: Capture the part of the screen to the LEFT of the overlay window ———
-// ipcMain.handle("capture-left-of-overlay", async () => {
-//   if (!win) return { ok: false, error: "no-window" };
-
-//   const overlay = win.getBounds(); // overlay window bounds in DIP (logical pixels)
-//   const display = screen.getDisplayMatching(overlay); // display containing overlay
-
-//   const scale = display.scaleFactor;
-//   const dispBounds = display.bounds; // {x,y,width,height} in DIP
-
-//   // Ask desktopCapturer for a full-resolution thumbnail of this display
-//   const sources = await desktopCapturer.getSources({
-//     types: ["screen"],
-//     thumbnailSize: {
-//       width: Math.floor(display.size.width * scale),
-//       height: Math.floor(display.size.height * scale),
-//     },
-//   });
-
-//   const source = pickScreenSourceForDisplayId(sources, display.id);
-//   if (!source?.thumbnail) return { ok: false, error: "no-thumbnail" };
-
-//   const nativeImg = source.thumbnail; // NativeImage at device pixels
-
-//   // Convert overlay bounds to device pixels relative to the display’s origin
-//   const overlayLeftPx = Math.max(0, Math.round((overlay.x - dispBounds.x) * scale));
-//   const fullH = Math.round(display.size.height * scale);
-
-//   // Crop: from x=0 to x=overlayLeftPx (the area to the LEFT of the overlay)
-//   const leftWidth = Math.max(0, Math.min(overlayLeftPx, nativeImg.getSize().width));
-//   const cropRect = { x: 0, y: 0, width: leftWidth, height: fullH };
-
-//   const leftImage =
-//     leftWidth > 0 ? nativeImg.crop(cropRect) : nativeImg.crop({ x: 0, y: 0, width: 1, height: 1 });
-
-//   const dataUrl = leftImage.toDataURL(); // PNG data URL
-//   return { ok: true, dataUrl, width: leftWidth, height: fullH, scale };
-// });
-
-// // (Optional) expose overlay bounds if you want them in the renderer
-// ipcMain.handle("get-overlay-bounds", () => win?.getBounds() ?? null);
-
-// IPC: return current window bounds in screen coordinates (CSS pixels)
 ipcMain.handle("get-underlay-crop-info", async (event) => {
   const overlayBounds = win.getBounds(); // DIP (logical) coords
   const display = screen.getDisplayMatching(overlayBounds);
@@ -142,3 +84,4 @@ ipcMain.handle("get-underlay-crop-info", async (event) => {
 
   return { sourceId: match.id, crop };
 });
+
