@@ -34,11 +34,14 @@ function lastNWords(text, n = 100) {
 }
 
 export default function Home() {
-  const [status, setStatus] = useState("idle");     // idle | connecting | connected | paused | error
+  const [status, setStatus] = useState("idle");
   const [finalText, setFinalText] = useState("");
   const [partialText, setPartialText] = useState("");
   const [aiAnswer, setAiAnswer] = useState("");
   const [showTranscript, setShowTranscript] = useState(true);
+
+  const [shots, setShots] = useState([]); // dataURLs
+  const overlayRef = useRef(null);
 
   const wsRef = useRef(null);
   const mediaRef = useRef(null);
@@ -126,13 +129,16 @@ export default function Home() {
   };
   const stop = async () => {
     try {
-      if (processorRef.current) { try { processorRef.current.disconnect(); } catch {}; processorRef.current.onaudioprocess = null; processorRef.current = null; }
-      if (sourceRef.current) { try { sourceRef.current.disconnect(); } catch {}; sourceRef.current = null; }
+      if (processorRef.current) { try { processorRef.current.disconnect(); } catch {} processorRef.current.onaudioprocess = null; processorRef.current = null; }
+      if (sourceRef.current) { try { sourceRef.current.disconnect(); } catch {} sourceRef.current = null; }
       if (mediaRef.current) { mediaRef.current.getTracks().forEach(t => t.stop()); mediaRef.current = null; }
-      if (audioCtxRef.current) { try { await audioCtxRef.current.close(); } catch {}; audioCtxRef.current = null; }
+      if (audioCtxRef.current) { try { await audioCtxRef.current.close(); } catch {} audioCtxRef.current = null; }
     } finally { isPausedRef.current = false; }
     const ws = wsRef.current;
-    if (ws && ws.readyState === WebSocket.OPEN) { try { ws.send(JSON.stringify({ type: "stop" })); } catch {}; try { ws.close(); } catch {} }
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      try { ws.send(JSON.stringify({ type: "stop" })); } catch {}
+      try { ws.close(); } catch {}
+    }
     wsRef.current = null; setStatus("idle");
   };
 
@@ -142,57 +148,140 @@ export default function Home() {
     try { wsRef.current?.send(JSON.stringify({ type: "ask_ai", text })); } catch (e) { console.error(e); }
   };
 
+  // Capture exactly what's "under" the overlay window (Electron)
+  const captureUnderOverlay = async () => {
+    try {
+      const info = await window.electronAPI.getUnderlayCropInfo();
+      const { sourceId, crop } = info;
+
+      // eslint-disable-next-line no-undef
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: {
+          mandatory: {
+            chromeMediaSource: "desktop",
+            chromeMediaSourceId: sourceId
+          }
+        }
+      });
+
+      const video = document.createElement("video");
+      video.srcObject = stream;
+      await video.play();
+
+      await new Promise((resolve) => {
+        if (video.readyState >= 2) resolve();
+        else video.onloadeddata = () => resolve();
+      });
+
+      const canvas = document.createElement("canvas");
+      canvas.width = crop.width;
+      canvas.height = crop.height;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(
+        video,
+        crop.x, crop.y, crop.width, crop.height, // src
+        0, 0, crop.width, crop.height            // dst
+      );
+
+      stream.getTracks().forEach(t => t.stop());
+
+      const dataUrl = canvas.toDataURL("image/png");
+      setShots(prev => [dataUrl, ...prev]);
+    } catch (e) {
+      console.error("Underlay capture failed:", e);
+    }
+  };
+
+  const clearImage = () => setShots([]); // remove image(s) from view
+
   const isRecording = status === "connected";
   const isPaused = status === "paused";
 
   return (
-    <div className="overlay-root">
-      <div className="window" role="group" aria-label="Voice overlay">
-        <div className="titlebar" title="Drag me" />
+    <div
+      className="overlay-root"
+      ref={overlayRef}
+      style={{
+        position: "fixed",
+        inset: 16,
+        borderRadius: 12,
+        overflow: "hidden",
+        boxShadow: "0 10px 30px rgba(0,0,0,0.25)",
+        backdropFilter: "blur(6px)",
+        backgroundColor: "rgba(20,20,20,0.6)"
+      }}
+    >
+      <div className="window" role="group" aria-label="Voice overlay" style={{ height: "100%", display: "flex", flexDirection: "column" }}>
+        <div className="titlebar" title="Drag me" style={{ height: 10 }} />
 
-        <div className="controls">
-          <div className="left-controls">
+        <div className="controls" style={{ display: "flex", justifyContent: "space-between", padding: 8 }}>
+          <div className="left-controls" style={{ display: "flex", gap: 8 }}>
             <button className="btn solid" onClick={start} disabled={status === "connecting" || isRecording || isPaused}>Start</button>
             {isRecording && <button className="btn" onClick={pause}>Pause</button>}
             {isPaused && <button className="btn" onClick={resume}>Resume</button>}
             <button className="btn" onClick={stop} disabled={status === "idle"}>Stop</button>
             <button className="btn" onClick={askAI} disabled={!finalText.trim() && !partialText.trim()}>Ask AI</button>
-            <span className={`status ${status}`}>{status}</span>
+
+            {/* Capture & Clear */}
+            <button className="btn" onClick={captureUnderOverlay}>Capture Under</button>
+            <button className="btn" onClick={clearImage} disabled={!shots.length}>Clear Image</button>
+
+            <span className="status" style={{ fontSize: 10, display: "flex", alignItems: "center" }}>
+              {status.charAt(0).toUpperCase() + status.slice(1, 5)}
+            </span>
           </div>
-          {/* tiny toggle to hide/show transcript */}
+
           <button
-  className={`toggle ${showTranscript ? "on" : "off"}`}
-  onClick={() => setShowTranscript(s => !s)}
-  title={showTranscript ? "Hide transcript" : "Show transcript"}
->
-  <span className="toggle-text">{showTranscript ? "User" : "Off"}</span>
-  <span className="knob"></span>
-</button>
+            className={`toggle ${showTranscript ? "on" : "off"}`}
+            onClick={() => setShowTranscript((s) => !s)}
+            title={showTranscript ? "Hide transcript" : "Show transcript"}
+          >
+            {showTranscript ? "User" : "Off"}
+          </button>
         </div>
 
-        {/* Grid must be allowed to shrink children so inner panes scroll */}
         <div
           className="panes"
-          style={{ gridTemplateColumns: showTranscript ? "minmax(220px, 33%) 1fr" : "1fr" }}
+          style={{
+            display: "grid",
+            gridTemplateColumns: showTranscript ? "minmax(220px, 33%) 1fr" : "1fr",
+            gap: 8,
+            padding: 8,
+            minHeight: 0,
+            flex: 1
+          }}
         >
           {showTranscript && (
-            <div className="pane">
+            <div className="pane" style={{ display: "flex", flexDirection: "column", minHeight: 0 }}>
               <div className="pane-title">Transcript</div>
-              {/* This body scrolls when long */}
-              <div className="pane-body">
+              <div className="pane-body" style={{ overflow: "auto" }}>
                 <pre className="pre-area">
                   {finalText}
                   {partialText && status !== "paused" && `${partialText} ▌`}
                   {status === "paused" && "[Paused — not recording]"}
                 </pre>
+
+                {/* ✅ Show the image ONLY in the transcript pane */}
+                {shots[0] && (
+                  <div style={{ marginTop: 12 }}>
+                    <div style={{ fontSize: 12, opacity: 0.75, marginBottom: 6 }}>
+                      Last capture (under overlay):
+                    </div>
+                    <img
+                      src={shots[0]}
+                      alt="underlay capture"
+                      style={{ maxWidth: "100%", borderRadius: 6, display: "block" }}
+                    />
+                  </div>
+                )}
               </div>
             </div>
           )}
 
-          <div className="pane">
+          <div className="pane" style={{ display: "flex", flexDirection: "column", minHeight: 0 }}>
             <div className="pane-title">AI Answer</div>
-            {/* This body also scrolls when long */}
-            <div className="pane-body">
+            <div className="pane-body" style={{ overflow: "auto" }}>
               <pre className="pre-area">
                 {aiAnswer || "Press Ask AI to get an answer based on the last 100 words."}
               </pre>

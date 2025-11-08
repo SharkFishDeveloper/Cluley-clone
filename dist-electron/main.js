@@ -1,4 +1,4 @@
-import { app, BrowserWindow } from "electron";
+import { app, BrowserWindow, ipcMain, screen, desktopCapturer } from "electron";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -24,7 +24,7 @@ function createWindow() {
     skipTaskbar: true,
     // optional: hide from taskbar
     focusable: true,
-    // keep focusable; set false if you want clicks to pass through
+    // keep focusable; set false if you 
     icon: path.join(process.env.VITE_PUBLIC, "electron-vite.svg"),
     webPreferences: {
       preload: path.join(__dirname$1, "preload.mjs")
@@ -49,6 +49,24 @@ app.on("window-all-closed", () => {
 });
 app.on("activate", () => {
   if (BrowserWindow.getAllWindows().length === 0) createWindow();
+});
+ipcMain.handle("get-underlay-crop-info", async (event) => {
+  const overlayBounds = win.getBounds();
+  const display = screen.getDisplayMatching(overlayBounds);
+  const scale = display.scaleFactor || 1;
+  const sources = await desktopCapturer.getSources({
+    types: ["screen"],
+    // tiny thumbnail is enough to populate display_id
+    thumbnailSize: { width: 1, height: 1 }
+  });
+  const match = sources.find((s) => s.display_id === String(display.id)) || sources[0];
+  const crop = {
+    x: Math.round(overlayBounds.x * scale),
+    y: Math.round(overlayBounds.y * scale),
+    width: Math.round(overlayBounds.width * scale),
+    height: Math.round(overlayBounds.height * scale)
+  };
+  return { sourceId: match.id, crop };
 });
 export {
   MAIN_DIST,

@@ -251,3 +251,15 @@ html, body, #root {
 /* .toggle-label {
   padding-left: 10px;
 } */
+
+.status.idle { background-color: #6366f1; }
+.status.connecting { background-color: #f59e0b; }
+.status.connected { background-color: #10b981; }
+.status.paused { background-color: #f97316; }
+.status.error { background-color: #ef4444; }
+
+.status {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: white; /* keep text white always */
+}
