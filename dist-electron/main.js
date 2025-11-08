@@ -12,7 +12,7 @@ process.env.VITE_PUBLIC = VITE_DEV_SERVER_URL ? path.join(process.env.APP_ROOT, 
 let win = null;
 function createWindow() {
   win = new BrowserWindow({
-    width: 500,
+    width: 410,
     height: 300,
     transparent: true,
     frame: false,
@@ -21,11 +21,8 @@ function createWindow() {
     thickFrame: true,
     backgroundColor: "#00000000",
     alwaysOnTop: true,
-    // keep overlay above other windows
     skipTaskbar: true,
-    // optional: hide from taskbar
     focusable: true,
-    // keep focusable; set false if you 
     icon: path.join(process.env.VITE_PUBLIC, "electron-vite.svg"),
     webPreferences: {
       preload: path.join(__dirname$1, "preload.mjs")
@@ -51,13 +48,13 @@ app.on("window-all-closed", () => {
 app.on("activate", () => {
   if (BrowserWindow.getAllWindows().length === 0) createWindow();
 });
-ipcMain.handle("get-underlay-crop-info", async (event) => {
+ipcMain.handle("get-underlay-crop-info", async () => {
+  if (!win) throw new Error("No window");
   const overlayBounds = win.getBounds();
   const display = screen.getDisplayMatching(overlayBounds);
   const scale = display.scaleFactor || 1;
   const sources = await desktopCapturer.getSources({
     types: ["screen"],
-    // tiny thumbnail is enough to populate display_id
     thumbnailSize: { width: 1, height: 1 }
   });
   const match = sources.find((s) => s.display_id === String(display.id)) || sources[0];
@@ -69,6 +66,17 @@ ipcMain.handle("get-underlay-crop-info", async (event) => {
   };
   return { sourceId: match.id, crop };
 });
+ipcMain.handle(
+  "resize-window",
+  (_evt, { w, h }) => {
+    if (!win) return;
+    const minW = 100;
+    const minH = 100;
+    const W = Math.max(minW, Math.floor(Number(w) || 0));
+    const H = Math.max(minH, Math.floor(Number(h) || 0));
+    win.setSize(W, H, true);
+  }
+);
 export {
   MAIN_DIST,
   RENDERER_DIST,

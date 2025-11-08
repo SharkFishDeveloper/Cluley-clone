@@ -46,9 +46,9 @@ export default function Home() {
 
   // OCR state
   const [ocrBusy, setOcrBusy] = useState(false);
-  const ocrAbortRef = useRef(null);        // AbortController
-  const ocrCanceledRef = useRef(false);    // flag to ignore late results
-  const ocrTimerRef = useRef(null);        // optional "taking too long" timer
+  const ocrAbortRef = useRef(null);
+  const ocrCanceledRef = useRef(false);
+  const ocrTimerRef = useRef(null);
 
   const wsRef = useRef(null);
   const mediaRef = useRef(null);
@@ -59,6 +59,10 @@ export default function Home() {
   const lastPartialRef = useRef("");
   const isPausedRef = useRef(false);
 
+  // Manual transcript input
+  const [manualInput, setManualInput] = useState("");
+
+  // ---------- streaming audio ----------
   const start = async () => {
     if (status === "connected" || status === "paused" || status === "connecting") return;
     setFinalText(""); setPartialText(""); setAiAnswer(""); setStatus("connecting");
@@ -155,6 +159,7 @@ export default function Home() {
     try { wsRef.current?.send(JSON.stringify({ type: "ask_ai", text })); } catch (e) { console.error(e); }
   };
 
+  // ---------- capture underlay ----------
   const captureUnderOverlay = async () => {
     try {
       const info = await window.electronAPI.getUnderlayCropInfo();
@@ -190,8 +195,8 @@ export default function Home() {
       );
 
       stream.getTracks().forEach((t) => t.stop());
-      const dataUrl = canvas.toDataURL("image/jpeg", 0.7); 
-    setShots(prev => [dataUrl, ...prev]);
+      const dataUrl = canvas.toDataURL("image/jpeg", 0.7);
+      setShots(prev => [dataUrl, ...prev]);
 
       const el = overlayRef.current;
       if (el) {
@@ -206,65 +211,116 @@ export default function Home() {
 
   // ---------- OCR with Cancel ----------
   const cancelOcr = () => {
-  if (!ocrBusy) return;
-  ocrCanceledRef.current = true;
-  try { ocrAbortRef.current?.abort(); } catch {}
-  if (ocrTimerRef.current) { clearTimeout(ocrTimerRef.current); ocrTimerRef.current = null; }
-  setOcrBusy(false);
-  setFinalText(p => p + (p.endsWith("\n") ? "" : "\n") + "[OCR canceled]\n");
-};
-
-const ocrCurrentImage = async () => {
-  if (ocrBusy) return;
-  if (!shots[0]) {
-    setFinalText(p => p + (p.endsWith("\n") ? "" : "\n") + "[No screenshot to OCR]\n");
-    return;
-  }
-
-  setOcrBusy(true);
-  ocrCanceledRef.current = false;
-
-  const controller = new AbortController();
-  ocrAbortRef.current = controller;
-
-  // Hard timeout (e.g., 25s) -> abort
-  ocrTimerRef.current = setTimeout(() => {
-    if (!ocrCanceledRef.current) {
-      try { controller.abort(); } catch {}
-    }
-  }, 25000);
-
-  try {
-    // Always pass options; extra arg is ignored if unused
-    const text = await ocrImageDataUrl(shots[0], { signal: controller.signal });
-
-    if (ocrCanceledRef.current) return; // ignore late result after cancel
-    const stamped = text ? text : "[OCR returned empty text]";
-    setFinalText(p =>
-      p + (p.endsWith("\n") ? "" : "\n") + "Screenshot of problem\n" + stamped + "\n"
-    );
-  } catch (err) {
-    if (ocrCanceledRef.current || err?.name === "AbortError") {
-      // canceled/aborted: already messaged in cancelOcr or via timeout
-      setFinalText(p => p + (p.endsWith("\n") ? "" : "\n") + "[OCR aborted]\n");
-    } else {
-      console.error(err);
-      setFinalText(p =>
-        p + (p.endsWith("\n") ? "" : "\n") + "[OCR FAILED] " + (err?.message || "Unknown error") + "\n"
-      );
-    }
-  } finally {
+    if (!ocrBusy) return;
+    ocrCanceledRef.current = true;
+    try { ocrAbortRef.current?.abort(); } catch {}
     if (ocrTimerRef.current) { clearTimeout(ocrTimerRef.current); ocrTimerRef.current = null; }
-    ocrAbortRef.current = null;
     setOcrBusy(false);
-  }
-};
+    setFinalText(p => p + (p.endsWith("\n") ? "" : "\n") + "[OCR canceled]\n");
+  };
+
+  const ocrCurrentImage = async () => {
+    if (ocrBusy) return;
+    if (!shots[0]) {
+      setFinalText(p => p + (p.endsWith("\n") ? "" : "\n") + "[No screenshot to OCR]\n");
+      return;
+    }
+
+    setOcrBusy(true);
+    ocrCanceledRef.current = false;
+
+    const controller = new AbortController();
+    ocrAbortRef.current = controller;
+
+    ocrTimerRef.current = setTimeout(() => {
+      if (!ocrCanceledRef.current) {
+        try { controller.abort(); } catch {}
+      }
+    }, 25000);
+
+    try {
+      const text = await ocrImageDataUrl(shots[0], { signal: controller.signal });
+      if (ocrCanceledRef.current) return;
+      const stamped = text ? text : "[OCR returned empty text]";
+      setFinalText(p =>
+        p + (p.endsWith("\n") ? "" : "\n") + "Screenshot of problem\n" + stamped + "\n"
+      );
+    } catch (err) {
+      if (ocrCanceledRef.current || err?.name === "AbortError") {
+        setFinalText(p => p + (p.endsWith("\n") ? "" : "\n") + "[OCR aborted]\n");
+      } else {
+        console.error(err);
+        setFinalText(p =>
+          p + (p.endsWith("\n") ? "" : "\n") + "[OCR FAILED] " + (err?.message || "Unknown error") + "\n"
+        );
+      }
+    } finally {
+      if (ocrTimerRef.current) { clearTimeout(ocrTimerRef.current); ocrTimerRef.current = null; }
+      ocrAbortRef.current = null;
+      setOcrBusy(false);
+    }
+  };
 
   const clearImage = () => setShots((prev) => prev.slice(1));
   const clearHistory = () => { setFinalText(""); setPartialText(""); };
 
   const isRecording = status === "connected";
   const isPaused = status === "paused";
+
+  // ---------- RESIZE BUTTON (like Excalidraw handle) ----------
+  const draggingRef = useRef(false);
+  const startMouseRef = useRef({ x: 0, y: 0 });
+  const startSizeRef = useRef({ w: 0, h: 0 });
+  const rafRef = useRef(0);
+
+  const onResizeStart = (e) => {
+    e.preventDefault();
+    draggingRef.current = true;
+    startMouseRef.current = { x: e.clientX, y: e.clientY };
+    startSizeRef.current = { w: window.innerWidth, h: window.innerHeight };
+    window.addEventListener("mousemove", onResizeMove);
+    window.addEventListener("mouseup", onResizeEnd);
+  };
+
+  const onResizeMove = (e) => {
+    if (!draggingRef.current) return;
+    const dx = e.clientX - startMouseRef.current.x;
+    const dy = e.clientY - startMouseRef.current.y;
+    const newW = startSizeRef.current.w + dx;
+    const newH = startSizeRef.current.h + dy;
+
+    if (!rafRef.current) {
+      rafRef.current = requestAnimationFrame(() => {
+        rafRef.current = 0;
+        try {
+          const W = Math.max(200, Math.floor(newW));
+          const H = Math.max(100, Math.floor(newH));
+          window.electronAPI?.resizeWindow?.(W, H);
+        } catch {}
+      });
+    }
+  };
+
+  const onResizeEnd = () => {
+    draggingRef.current = false;
+    window.removeEventListener("mousemove", onResizeMove);
+    window.removeEventListener("mouseup", onResizeEnd);
+    if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = 0; }
+  };
+
+  // Add manual text to transcript
+  const appendManual = () => {
+    const t = manualInput.trim();
+    if (!t) return;
+    setFinalText(p => p + (p.endsWith("\n") ? "" : "\n") + t + "\n");
+    setManualInput("");
+  };
+  const onManualKeyDown = (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault(); // keep it single-line submit
+      appendManual();
+    }
+  };
 
   return (
     <div
@@ -285,7 +341,6 @@ const ocrCurrentImage = async () => {
         WebkitUserSelect: "none",
         userSelect: "none",
         cursor: "default"
-        // NOTE: no WebkitAppRegion here; only your pill should be draggable
       }}
     >
       {/* DRAG PILL — the ONLY drag region */}
@@ -307,6 +362,26 @@ const ocrCurrentImage = async () => {
         title=""
       />
 
+      {/* RESIZE HANDLE BUTTON (no arrow cursor) */}
+      <button
+        onMouseDown={onResizeStart}
+        title="Resize"
+        style={{
+          position: "absolute",
+          right: 10,
+          bottom: 10,
+          width: 22,
+          height: 22,
+          borderRadius: "50%",
+          border: "1px solid rgba(255,255,255,0.35)",
+          background: "rgba(255,255,255,0.12)",
+          cursor: "default",               // ← no resize arrow
+          WebkitAppRegion: "no-drag",
+          userSelect: "none",
+          zIndex: 1000,
+        }}
+      />
+
       {/* CONTROLS */}
       <div
         className="controls"
@@ -318,61 +393,50 @@ const ocrCurrentImage = async () => {
         }}
       >
         <div className="left-controls" style={{ display: "flex", gap: 6, flexWrap: "wrap", margin: 0 }}>
-  <button className="btn solid" style={{ cursor: "default", margin: 0 }} onClick={start} disabled={status === "connecting" || isRecording || isPaused}>
-    Start
-  </button>
-
-  {isRecording && (
-    <button className="btn" style={{ cursor: "default", margin: 0 }} onClick={pause}>
-      Pause
-    </button>
-  )}
-  {isPaused && (
-    <button className="btn" style={{ cursor: "default", margin: 0 }} onClick={resume}>
-      Resume
-    </button>
-  )}
-
-  <button className="btn" style={{ cursor: "default", margin: 0 }} onClick={stop} disabled={status === "idle"}>
-    Stop
-  </button>
-
-  <button className="btn" style={{ cursor: "default", margin: 0 }} onClick={askAI} disabled={!finalText.trim() && !partialText.trim()}>
-    Ask AI
-  </button>
-
-  {/* ✅ Restore Capture Under */}
-  <button className="btn" style={{ cursor: "default", margin: 0 }} onClick={captureUnderOverlay}>
-    Capture Under
-  </button>
-
-  {/* OCR + Cancel OCR */}
-  <button className="btn" style={{ cursor: "default", margin: 0 }} onClick={ocrCurrentImage} disabled={!shots[0] || ocrBusy}>
-    {ocrBusy ? "OCR…" : "OCR Image"}
-  </button>
-
-  {ocrBusy && (
-    <button className="btn" style={{ cursor: "default", margin: 0 }} onClick={cancelOcr}>
-      Cancel OCR
-    </button>
-  )}
-
-  <button className="btn" style={{ cursor: "default", margin: 0 }} onClick={clearImage} disabled={!shots[0]}>
-    Clear Image
-  </button>
-
-  <button className="btn" style={{ cursor: "default", margin: 0 }} onClick={clearHistory} disabled={!finalText && !partialText}>
-    Clear History
-  </button>
-
-  <span className="status" style={{ fontSize: 10, display: "flex", alignItems: "center", margin: 0 }}>
-    {status.charAt(0).toUpperCase() + status.slice(1, 5)}
-  </span>
-</div>
+          <button className="btn solid" style={{ cursor: "default", margin: 0 }} onClick={start} disabled={status === "connecting" || isRecording || isPaused}>
+            Start
+          </button>
+          {isRecording && (
+            <button className="btn" style={{ cursor: "default", margin: 0 }} onClick={pause}>
+              Pause
+            </button>
+          )}
+          {isPaused && (
+            <button className="btn" style={{ cursor: "default", margin: 0 }} onClick={resume}>
+              Resume
+            </button>
+          )}
+          <button className="btn" style={{ cursor: "default", margin: 0 }} onClick={stop} disabled={status === "idle"}>
+            Stop
+          </button>
+          <button className="btn" style={{ cursor: "default", margin: 0 }} onClick={askAI} disabled={!finalText.trim() && !partialText.trim()}>
+            Ask AI
+          </button>
+          <button className="btn" style={{ cursor: "default", margin: 0 }} onClick={captureUnderOverlay}>
+            Capture Under
+          </button>
+          <button className="btn" style={{ cursor: "default", margin: 0 }} onClick={ocrCurrentImage} disabled={!shots[0] || ocrBusy}>
+            {ocrBusy ? "OCR…" : "OCR Image"}
+          </button>
+          {ocrBusy && (
+            <button className="btn" style={{ cursor: "default", margin: 0 }} onClick={cancelOcr}>
+              Cancel OCR
+            </button>
+          )}
+          <button className="btn" style={{ cursor: "default", margin: 0 }} onClick={clearImage} disabled={!shots[0]}>
+            Clear Image
+          </button>
+          <button className="btn" style={{ cursor: "default", margin: 0 }} onClick={clearHistory} disabled={!finalText && !partialText}>
+            Clear History
+          </button>
+          <span className="status" style={{ fontSize: 10, display: "flex", alignItems: "center", margin: 0 }}>
+            {status.charAt(0).toUpperCase() + status.slice(1, 5)}
+          </span>
+        </div>
 
         <button
           className={`toggle ${showTranscript ? "on" : "off"}`}
-          style={{ cursor: "default", margin: 0 }}
+          style={{ cursor: "default", marginTop: "28px" }}
           onClick={() => setShowTranscript(s => !s)}
           title=""
         >
@@ -382,40 +446,64 @@ const ocrCurrentImage = async () => {
 
       {/* PANES */}
       <div
-        className="panes"
-        style={{
-          display: "grid",
-          gridTemplateColumns: showTranscript ? "1fr 1fr" : "1fr",
-          gap: 6,
-          padding: 0,
-          minHeight: 0,
-          flex: 1,
-          margin: 0
-        }}
-      >
-        {showTranscript && (
-          <div className="pane" style={{ display: "grid", gridTemplateRows: "auto 1fr", minHeight: 0, margin: 0 }}>
-            <div className="pane-title" style={{ padding: 4, margin: 0 }}>Transcript</div>
-            <div className="pane-body" style={{ overflow: "auto", padding: 4, margin: 0 }}>
-              <pre className="pre-area" style={{ whiteSpace: "pre-wrap", margin: 0 }}>
-                {finalText}
-                {partialText && status !== "paused" && `${partialText} ▌`}
-                {status === "paused" && "[Paused — not recording]"}
-              </pre>
-              {shots[0] && (
-                <div style={{ marginTop: 6 }}>
-                  <img
-                    src={shots[0]}
-                    alt="underlay capture"
-                    style={{ width: "100%", borderRadius: 6, display: "block", pointerEvents: "none" }}
-                  />
-                </div>
-              )}
-            </div>
+  className="panes"
+  style={{
+    display: "grid",
+    gridTemplateColumns: showTranscript ? "35% 65%" : "1fr",
+    gap: 6,
+    padding: 0,
+    minHeight: 0,
+    flex: 1,
+    margin: 0
+  }}
+>
+  {/* Left: User transcript (30%) */}
+  {showTranscript && (
+    <div className="pane" style={{ display: "grid", gridTemplateRows: "auto 1fr auto", minHeight: 0, margin: 0 }}>
+      <div className="pane-title" style={{ padding: 4, margin: 0 }}>Transcript</div>
+      <div className="pane-body" style={{ overflow: "auto", padding: 4, margin: 0 }}>
+        <pre className="pre-area" style={{ whiteSpace: "pre-wrap", margin: 0 }}>
+          {finalText}
+          {partialText && status !== "paused" && `${partialText} ▌`}
+          {status === "paused" && "[Paused — not recording]"}
+        </pre>
+        {shots[0] && (
+          <div style={{ marginTop: 6 }}>
+            <img
+              src={shots[0]}
+              alt="underlay capture"
+              style={{ width: "100%", borderRadius: 6, display: "block", pointerEvents: "none" }}
+            />
           </div>
         )}
-
-        <div className="pane" style={{ display: "grid", gridTemplateRows: "auto 1fr", minHeight: 0, margin: 0 }}>
+      </div>
+      <div style={{ display: "flex", gap: 6, padding: 4, borderTop: "1px solid rgba(255,255,255,0.12)" }}>
+        <input
+          type="text"
+          value={manualInput}
+          onChange={(e) => setManualInput(e.target.value)}
+          onKeyDown={onManualKeyDown}
+          placeholder="Add to transcript and press Enter…"
+          style={{
+            flex: 1,
+            background: "rgba(255,255,255,0.06)",
+            border: "1px solid rgba(255,255,255,0.25)",
+            color: "#fff",
+            borderRadius: 6,
+            padding: "6px 8px",
+            outline: "none",
+            WebkitAppRegion: "no-drag",
+            cursor: "default",
+            width:"70px"
+          }}
+        />
+        <button className="btn" onClick={appendManual} disabled={!manualInput.trim()} style={{ margin: 0, WebkitAppRegion: "no-drag", cursor: "default" }}>
+          Add
+        </button>
+      </div>
+    </div>
+  )}
+                <div className="pane" style={{ display: "grid", gridTemplateRows: "auto 1fr", minHeight: 0, margin: 0 }}>
           <div className="pane-title" style={{ padding: 4, margin: 0 }}>AI Answer</div>
           <div className="pane-body" style={{ overflow: "auto", padding: 4, margin: 0 }}>
             <pre className="pre-area" style={{ whiteSpace: "pre-wrap", margin: 0 }}>
