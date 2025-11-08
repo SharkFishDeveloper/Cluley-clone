@@ -1,5 +1,5 @@
 import React, { useRef, useState } from "react";
-
+import { ocrImageDataUrl } from "./OcrClient";
 const WS_URL = "ws://localhost:8080/transcribe";
 
 // ---------- audio helpers ----------
@@ -40,8 +40,12 @@ export default function Home() {
   const [aiAnswer, setAiAnswer] = useState("");
   const [showTranscript, setShowTranscript] = useState(true);
 
-  const [shots, setShots] = useState([]); // dataURLs
+  // Screenshots (dataURLs), newest first
+  const [shots, setShots] = useState([]);
   const overlayRef = useRef(null);
+
+  // OCR busy flag
+  const [ocrBusy, setOcrBusy] = useState(false);
 
   const wsRef = useRef(null);
   const mediaRef = useRef(null);
@@ -148,52 +152,84 @@ export default function Home() {
     try { wsRef.current?.send(JSON.stringify({ type: "ask_ai", text })); } catch (e) { console.error(e); }
   };
 
-  // Capture exactly what's "under" the overlay window (Electron)
+  // Capture exactly what's under the overlay window (your existing bridge)
   const captureUnderOverlay = async () => {
-    try {
-      const info = await window.electronAPI.getUnderlayCropInfo();
-      const { sourceId, crop } = info;
+  try {
+    const info = await window.electronAPI.getUnderlayCropInfo();
+    const { sourceId, crop } = info;
 
-      // eslint-disable-next-line no-undef
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: false,
-        video: {
-          mandatory: {
-            chromeMediaSource: "desktop",
-            chromeMediaSourceId: sourceId
-          }
+    // desktop stream for that screen
+    // eslint-disable-next-line no-undef
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: {
+        mandatory: {
+          chromeMediaSource: "desktop",
+          chromeMediaSourceId: sourceId
         }
-      });
+      }
+    });
 
-      const video = document.createElement("video");
-      video.srcObject = stream;
-      await video.play();
+    const video = document.createElement("video");
+    video.srcObject = stream;
+    await video.play();
+    await new Promise((resolve) => {
+      if (video.readyState >= 2) resolve();
+      else video.onloadeddata = () => resolve();
+    });
 
-      await new Promise((resolve) => {
-        if (video.readyState >= 2) resolve();
-        else video.onloadeddata = () => resolve();
-      });
+    const canvas = document.createElement("canvas");
+    canvas.width = crop.width;
+    canvas.height = crop.height;
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(
+      video,
+      crop.x, crop.y, crop.width, crop.height, // src
+      0, 0, crop.width, crop.height            // dst
+    );
 
-      const canvas = document.createElement("canvas");
-      canvas.width = crop.width;
-      canvas.height = crop.height;
-      const ctx = canvas.getContext("2d");
-      ctx.drawImage(
-        video,
-        crop.x, crop.y, crop.width, crop.height, // src
-        0, 0, crop.width, crop.height            // dst
-      );
+    // stop capture
+    stream.getTracks().forEach(t => t.stop());
 
-      stream.getTracks().forEach(t => t.stop());
+    const dataUrl = canvas.toDataURL("image/png");
+    setShots(prev => [dataUrl, ...prev]);
 
-      const dataUrl = canvas.toDataURL("image/png");
-      setShots(prev => [dataUrl, ...prev]);
-    } catch (e) {
-      console.error("Underlay capture failed:", e);
+    // IMPORTANT: ensure the overlay has NO background image
+    const el = overlayRef.current;
+    if (el) {
+      el.style.backgroundImage = "none";   // or ""
+      el.style.backgroundSize = "";
+      el.style.backgroundPosition = "";
     }
+  } catch (e) {
+    console.error("Underlay capture failed:", e);
+  }
+};
+
+  // Clear the current image preview
+  const clearImage = () => {
+    setShots((prev) => prev.slice(1)); // drop the newest one
   };
 
-  const clearImage = () => setShots([]); // remove image(s) from view
+  // Run OCR on the latest image and append text into transcript
+  const ocrCurrentImage = async () => {
+    if (!shots[0] || ocrBusy) return;
+    setOcrBusy(true);
+    try {
+      // Prefer storing your key in an env (Vite) or fetch via IPC from main:
+      const text = await ocrImageDataUrl(shots[0]);
+
+      const stamped = text ? text : "[OCR returned empty text]";
+      setFinalText((p) => p + (p.endsWith('\n') ? '' : '\n') + "[OCR]\n" + stamped + "\n");
+      // Optionally also remove the image after OCR:
+      // clearImage();
+    } catch (err) {
+      console.error(err);
+      setFinalText((p) => p + (p.endsWith('\n') ? '' : '\n') + "[OCR FAILED] " + (err?.message || 'Unknown error') + "\n");
+    } finally {
+      setOcrBusy(false);
+    }
+  };
 
   const isRecording = status === "connected";
   const isPaused = status === "paused";
@@ -212,23 +248,27 @@ export default function Home() {
         backgroundColor: "rgba(20,20,20,0.6)"
       }}
     >
-      <div className="window" role="group" aria-label="Voice overlay" style={{ height: "100%", display: "flex", flexDirection: "column" }}>
-        <div className="titlebar" title="Drag me" style={{ height: 10 }} />
+      <div className="window" role="group" aria-label="Voice overlay" style={{height:"100%", display:"flex", flexDirection:"column"}}>
+        <div className="titlebar" title="Drag me" style={{height: 10}} />
 
-        <div className="controls" style={{ display: "flex", justifyContent: "space-between", padding: 8 }}>
-          <div className="left-controls" style={{ display: "flex", gap: 8 }}>
+        <div className="controls" style={{display:"flex", justifyContent:"space-between", padding: 8}}>
+          <div className="left-controls" style={{display:"flex", gap:8, flexWrap:"wrap"}}>
             <button className="btn solid" onClick={start} disabled={status === "connecting" || isRecording || isPaused}>Start</button>
             {isRecording && <button className="btn" onClick={pause}>Pause</button>}
             {isPaused && <button className="btn" onClick={resume}>Resume</button>}
             <button className="btn" onClick={stop} disabled={status === "idle"}>Stop</button>
             <button className="btn" onClick={askAI} disabled={!finalText.trim() && !partialText.trim()}>Ask AI</button>
 
-            {/* Capture & Clear */}
             <button className="btn" onClick={captureUnderOverlay}>Capture Under</button>
-            <button className="btn" onClick={clearImage} disabled={!shots.length}>Clear Image</button>
+            <button className="btn" onClick={ocrCurrentImage} disabled={!shots[0] || ocrBusy}>
+              {ocrBusy ? "OCR…" : "OCR Image"}
+            </button>
+            <button className="btn" onClick={clearImage} disabled={!shots[0]}>
+              Clear Image
+            </button>
 
-            <span className="status" style={{ fontSize: 10, display: "flex", alignItems: "center" }}>
-              {status.charAt(0).toUpperCase() + status.slice(1, 5)}
+            <span className="status" style={{fontSize:10, display:"flex", alignItems:"center"}}>
+              {status.charAt(0).toUpperCase() + status.slice(1,5)}
             </span>
           </div>
 
@@ -244,8 +284,8 @@ export default function Home() {
         <div
           className="panes"
           style={{
-            display: "grid",
-            gridTemplateColumns: showTranscript ? "minmax(220px, 33%) 1fr" : "1fr",
+            display:"grid",
+            gridTemplateColumns: showTranscript ? "minmax(260px, 38%) 1fr" : "1fr",
             gap: 8,
             padding: 8,
             minHeight: 0,
@@ -253,25 +293,23 @@ export default function Home() {
           }}
         >
           {showTranscript && (
-            <div className="pane" style={{ display: "flex", flexDirection: "column", minHeight: 0 }}>
+            <div className="pane" style={{display:"flex", flexDirection:"column", minHeight:0}}>
               <div className="pane-title">Transcript</div>
-              <div className="pane-body" style={{ overflow: "auto" }}>
-                <pre className="pre-area">
+              <div className="pane-body" style={{overflow:"auto"}}>
+                {/* TEXT */}
+                <pre className="pre-area" style={{whiteSpace:"pre-wrap"}}>
                   {finalText}
                   {partialText && status !== "paused" && `${partialText} ▌`}
                   {status === "paused" && "[Paused — not recording]"}
                 </pre>
 
-                {/* ✅ Show the image ONLY in the transcript pane */}
+                {/* IMAGE PREVIEW — now shown ONLY in Transcript */}
                 {shots[0] && (
                   <div style={{ marginTop: 12 }}>
-                    <div style={{ fontSize: 12, opacity: 0.75, marginBottom: 6 }}>
-                      Last capture (under overlay):
-                    </div>
                     <img
                       src={shots[0]}
                       alt="underlay capture"
-                      style={{ maxWidth: "100%", borderRadius: 6, display: "block" }}
+                      style={{ width: "100%", borderRadius: 6, display: "block" }}
                     />
                   </div>
                 )}
@@ -279,10 +317,10 @@ export default function Home() {
             </div>
           )}
 
-          <div className="pane" style={{ display: "flex", flexDirection: "column", minHeight: 0 }}>
+          <div className="pane" style={{display:"flex", flexDirection:"column", minHeight:0}}>
             <div className="pane-title">AI Answer</div>
-            <div className="pane-body" style={{ overflow: "auto" }}>
-              <pre className="pre-area">
+            <div className="pane-body" style={{overflow:"auto"}}>
+              <pre className="pre-area" style={{whiteSpace:"pre-wrap"}}>
                 {aiAnswer || "Press Ask AI to get an answer based on the last 100 words."}
               </pre>
             </div>
