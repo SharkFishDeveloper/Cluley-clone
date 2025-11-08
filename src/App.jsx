@@ -6,7 +6,7 @@ export default function App() {
   return (
     <div className="app-wrap">
       {/* Drag pill (global, always draggable) */}
-      <div className="title-drag drag" />
+      {/* <div className="title-drag drag" /> */}
       {/* Your app */}
       <Home />
     </div>

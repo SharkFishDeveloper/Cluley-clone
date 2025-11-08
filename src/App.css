@@ -1,24 +1,4 @@
-/* ===================== YOUR EXISTING RULES (unchanged transparency) ===================== */
-/* Core container — no padding, no gap, no radius */
-/* .app-wrap {
-  width: 100%;
-  height: 100%;
-  box-sizing: border-box;
-  background: rgba(20,20,20,0.35);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  display: flex;
-  flex-direction: column;
-} */
 
-/* .title-drag {
-  height: 10px;
-  -webkit-app-region: drag;
-  opacity: 0.01;
-  margin: 0; */ /* no spacing */
-/* } */
-
-/* Header — zero spacing */
 .header {
   display: flex;
   align-items: center;
@@ -254,19 +234,13 @@ html, body, #root {
   position: relative;
 }
 
-.title-drag {
-  width: 100%;
-  height: 32px; /* must have height to capture drag */
-  background: transparent;
-  position: absolute;
-  top: 0;
-  left: 0;
-}
+
 
 .drag {
   -webkit-app-region: drag;
-}
-.drag {
-  -webkit-app-region: drag;
   cursor: default; /* avoid grab/pointer look */
+}
+
+.no-drag, button, input, textarea, a {
+  -webkit-app-region: no-drag;
 }
