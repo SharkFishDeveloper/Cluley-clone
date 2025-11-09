@@ -22,3 +22,5 @@ contextBridge.exposeInMainWorld("ipc", {
   send: (channel, ...args) => ipcRenderer.send(channel, ...args),
   invoke: (channel, ...args) => ipcRenderer.invoke(channel, ...args),
 });
+
+

@@ -33,8 +33,6 @@ function lastNWords(text, n = 100) {
   const words = text.replace(/\s+/g, " ").trim().split(" ").filter(Boolean);
   return words.slice(Math.max(0, words.length - n)).join(" ");
 }
-
-// Heuristic: pick a bluetooth-ish label
 function looksBluetoothLabel(label = "") {
   const l = label.toLowerCase();
   return (
@@ -47,16 +45,64 @@ function looksBluetoothLabel(label = "") {
   );
 }
 
+// Try system audio via desktopCapturer (if your preload exposes a source id)
+async function getSystemAudioViaDesktopCapturer() {
+  try {
+    const id = await window.electronAPI?.getPrimaryDisplaySourceId?.(); // OPTIONAL helper you can add in preload
+    if (!id) throw new Error("No sourceId from preload");
+    const sys = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        mandatory: {
+          chromeMediaSource: "desktop",
+          chromeMediaSourceId: id,
+        },
+      },
+      video: false,
+    });
+    const a = sys.getAudioTracks()[0];
+    if (!a) {
+      sys.getTracks().forEach((t) => t.stop());
+      throw new Error("No audio track from desktopCapturer");
+    }
+    // auto-cleanup on stop sharing
+    a.onended = () => {
+      try { sys.getTracks().forEach((t) => t.stop()); } catch {}
+    };
+    return sys;
+  } catch (e) {
+    throw e;
+  }
+}
+
+// Most reliable pure-web path in Electron/Chromium: request video+audio, then drop video
+async function getSystemAudioViaDisplayMedia() {
+  const sys = await navigator.mediaDevices.getDisplayMedia({
+    video: true,
+    audio: true, // user must allow/share audio in Chromium picker
+  });
+  // Must have audio
+  const a = sys.getAudioTracks()[0];
+  if (!a) {
+    sys.getTracks().forEach((t) => t.stop());
+    throw new Error("No system-audio track granted");
+  }
+  // Clean up when user stops sharing
+  a.onended = () => {
+    try { sys.getTracks().forEach((t) => t.stop()); } catch {}
+  };
+  // Drop the video track; keep audio only
+  sys.getVideoTracks().forEach((t) => sys.removeTrack(t));
+  return sys;
+}
+
 export default function Home() {
   const [status, setStatus] = useState("idle");
   const [finalText, setFinalText] = useState("");
   const [partialText, setPartialText] = useState("");
   const [aiAnswer, setAiAnswer] = useState("");
   const [showTranscript, setShowTranscript] = useState(true);
-
-  const [includeSystemAudio, setIncludeSystemAudio] = useState(false);
-const statusColor = status !== "idle" ? "#4CAF50" : "#F44336";
-
+  const [includeSystemAudio, setIncludeSystemAudio] = useState(true);
+  const statusColor = status !== "idle" ? "#4CAF50" : "#F44336";
   const [shots, setShots] = useState([]);
   const overlayRef = useRef(null);
 
@@ -68,11 +114,18 @@ const statusColor = status !== "idle" ? "#4CAF50" : "#F44336";
 
   // Audio / WS
   const wsRef = useRef(null);
+
+  // Mic/mix refs
   const mediaRef = useRef(null);
   const sourceRef = useRef(null);
+  const sysStreamRef = useRef(null);
+  const mixedStreamRef = useRef(null);
+  const mixSourceRef = useRef(null);
+  const micGainRef = useRef(null);
+  const sysGainRef = useRef(null);
+
   const processorRef = useRef(null);
   const audioCtxRef = useRef(null);
-  const analyserRef = useRef(null);
   const inputRateRef = useRef(null);
   const lastPartialRef = useRef("");
   const isPausedRef = useRef(false);
@@ -83,7 +136,7 @@ const statusColor = status !== "idle" ? "#4CAF50" : "#F44336";
   // Device selection
   const [inputDevices, setInputDevices] = useState([]);
   const [selectedInputId, setSelectedInputId] = useState("");
-  const [deviceRefreshKey, setDeviceRefreshKey] = useState(0); // force rerender refresh
+  const [deviceRefreshKey, setDeviceRefreshKey] = useState(0);
 
   // enumerate devices
   const enumerate = async () => {
@@ -91,8 +144,6 @@ const statusColor = status !== "idle" ? "#4CAF50" : "#F44336";
       const devices = await navigator.mediaDevices.enumerateDevices();
       const inputs = devices.filter((d) => d.kind === "audioinput");
       setInputDevices(inputs);
-
-      // Auto-pick bluetooth if available, else keep existing, else default
       const currentStillExists = inputs.some((d) => d.deviceId === selectedInputId);
       if (!selectedInputId || !currentStillExists) {
         const bt = inputs.find((d) => looksBluetoothLabel(d.label));
@@ -105,10 +156,7 @@ const statusColor = status !== "idle" ? "#4CAF50" : "#F44336";
 
   useEffect(() => {
     enumerate();
-    const onChange = () => {
-      // Wait a tick so Chromium updates labels/states
-      setTimeout(() => enumerate(), 250);
-    };
+    const onChange = () => setTimeout(() => enumerate(), 250);
     navigator.mediaDevices.addEventListener("devicechange", onChange);
     return () => {
       navigator.mediaDevices.removeEventListener("devicechange", onChange);
@@ -116,7 +164,7 @@ const statusColor = status !== "idle" ? "#4CAF50" : "#F44336";
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [deviceRefreshKey]);
 
-  // ---------- streaming audio ----------
+  // ---------- streaming audio (mic + optional system) ----------
   const start = async () => {
     if (status === "connected" || status === "paused" || status === "connecting") return;
     setFinalText("");
@@ -124,10 +172,11 @@ const statusColor = status !== "idle" ? "#4CAF50" : "#F44336";
     setAiAnswer("");
     setStatus("connecting");
 
+    // Open WS early so we can report errors
     const ws = new WebSocket(WS_URL);
     ws.binaryType = "arraybuffer";
     wsRef.current = ws;
-    ws.onopen = () => setStatus("connected");
+    ws.onopen = () => setStatus((s) => (s === "connecting" ? "connected" : s));
     ws.onclose = () => setStatus("idle");
     ws.onerror = () => setStatus("error");
     ws.onmessage = (ev) => {
@@ -151,27 +200,18 @@ const statusColor = status !== "idle" ? "#4CAF50" : "#F44336";
       }
     };
 
-    // Try getting mic with constraints that suit BT headsets
-    // If this ends up silent, we'll retry with a fallback.
-    const tryOpen = async (constraints) => {
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
-      return stream;
-    };
-
-    // Preferred constraints for BT mic (mono, EC/AGC off)
+    // Mic constraints (BT-friendly)
     const preferred = {
       audio: {
         deviceId: selectedInputId ? { exact: selectedInputId } : undefined,
         channelCount: { ideal: 1 },
-        sampleRate: { ideal: 48000 }, // many BT stacks offer 16k/24k/48k; 48k ok (we resample)
+        sampleRate: { ideal: 48000 },
         echoCancellation: false,
         noiseSuppression: false,
         autoGainControl: false,
       },
       video: false,
     };
-
-    // Fallback constraints if needed
     const fallback = {
       audio: {
         deviceId: selectedInputId ? { exact: selectedInputId } : undefined,
@@ -185,113 +225,116 @@ const statusColor = status !== "idle" ? "#4CAF50" : "#F44336";
     };
 
     try {
-      let stream = null;
+      // 1) Open mic
+      let micStream = null;
       try {
-        stream = await tryOpen(preferred);
-      } catch (e1) {
-        console.warn("preferred constraints failed, trying fallback", e1);
-        stream = await tryOpen(fallback);
+        micStream = await navigator.mediaDevices.getUserMedia(preferred);
+      } catch {
+        micStream = await navigator.mediaDevices.getUserMedia(fallback);
       }
+      // Track-ended handler (BT disconnect, etc.)
+      micStream.getAudioTracks().forEach((t) => {
+        t.onended = () => {
+          console.warn("Mic track ended");
+          stop(); // full cleanup
+        };
+      });
+      mediaRef.current = micStream;
 
-      mediaRef.current = stream;
+      // 2) Optional: open system audio
+      let sys = null;
+      if (includeSystemAudio) {
+        try {
+          // Prefer a desktopCapturer-based path if preload provides source id
+          sys = await getSystemAudioViaDesktopCapturer();
+        } catch {
+          // Fallback to getDisplayMedia(video+audio), then drop video
+          try {
+            sys = await getSystemAudioViaDisplayMedia();
+          } catch (e2) {
+            console.warn("System audio not granted; continuing with mic-only.", e2);
+            sys = null;
+          }
+        }
+        if (sys) {
+          sys.getAudioTracks().forEach((t) => {
+            t.onended = () => {
+              console.warn("System-audio track ended");
+              // Don’t kill mic if user just stopped sharing system audio:
+              try { sys.getTracks().forEach((x) => x.stop()); } catch {}
+              sysStreamRef.current = null;
+              // keep running on mic-only
+            };
+          });
+        }
+      }
+      sysStreamRef.current = sys;
 
+      // 3) Mix mic + system in a single AudioContext
       const AudioCtx = window.AudioContext || window.webkitAudioContext;
       const audioCtx = new AudioCtx();
       audioCtxRef.current = audioCtx;
+      try { await audioCtx.resume(); } catch {}
 
-      // Some Chromium builds start suspended until resume() is called by user gesture.
-      try {
-        await audioCtx.resume();
-      } catch {}
+      const dest = audioCtx.createMediaStreamDestination();
+      mixedStreamRef.current = dest.stream;
 
+      const micNode = audioCtx.createMediaStreamSource(micStream);
+      sourceRef.current = micNode;
+      const micGain = audioCtx.createGain();
+      micGain.gain.value = 1.0;
+      micGainRef.current = micGain;
+      micNode.connect(micGain).connect(dest);
+
+      if (sysStreamRef.current) {
+        const sysNode = audioCtx.createMediaStreamSource(sysStreamRef.current);
+        const sysGain = audioCtx.createGain();
+        sysGain.gain.value = 1.0;
+        sysGainRef.current = sysGain;
+        sysNode.connect(sysGain).connect(dest);
+      } else {
+        sysGainRef.current = null;
+      }
+
+      // 4) Pull mixed audio, downmix to mono, resample to 16k, and send to WS
       inputRateRef.current = audioCtx.sampleRate;
-      const source = audioCtx.createMediaStreamSource(stream);
-      sourceRef.current = source;
 
-      // Silent audio guard: create a small analyser to ensure we get signal
-      const analyser = audioCtx.createAnalyser();
-      analyser.fftSize = 2048;
-      analyserRef.current = analyser;
-      source.connect(analyser);
-
-      const processor = audioCtx.createScriptProcessor(4096, 1, 1);
+      const processor = audioCtx.createScriptProcessor(4096, 2, 1); // deprecated but practical here
       processorRef.current = processor;
 
-      // If the stream is “dead silent” for 2s, auto-retry with fallback constraints
-      let silentFrames = 0;
-      const silenceThreshold = 0.0005; // ~ -66 dBFS
-      const silenceFramesNeeded = Math.round((audioCtx.sampleRate / 4096) * 2); // ~2s
+      const mixedSource = audioCtx.createMediaStreamSource(mixedStreamRef.current);
+      mixSourceRef.current = mixedSource;
+      mixedSource.connect(processor);
+      try {
+        // Ensure the node processes; some stacks require a sink
+        processor.connect(audioCtx.destination);
+      } catch {}
 
       processor.onaudioprocess = (evt) => {
-        // silence detection
-        const buf = new Float32Array(analyser.fftSize);
-        analyser.getFloatTimeDomainData?.(buf);
-        let peak = 0;
-        for (let i = 0; i < buf.length; i++) {
-          const v = Math.abs(buf[i]);
-          if (v > peak) peak = v;
-        }
-        if (peak < silenceThreshold) {
-          silentFrames++;
-        } else {
-          silentFrames = 0;
-        }
-
-        if (silentFrames > silenceFramesNeeded && status === "connected") {
-          console.warn("Detected prolonged silence—retrying mic with fallback constraints");
-          // Restart mic with fallback settings
-          stop(true).then(async () => {
-            try {
-              const stream2 = await navigator.mediaDevices.getUserMedia(fallback);
-              mediaRef.current = stream2;
-              // restart pipeline quickly
-              const ctx2 = new AudioCtx();
-              audioCtxRef.current = ctx2;
-              await ctx2.resume();
-              inputRateRef.current = ctx2.sampleRate;
-              const src2 = ctx2.createMediaStreamSource(stream2);
-              sourceRef.current = src2;
-
-              const an2 = ctx2.createAnalyser();
-              an2.fftSize = 2048;
-              analyserRef.current = an2;
-              src2.connect(an2);
-
-              const pr2 = ctx2.createScriptProcessor(4096, 1, 1);
-              processorRef.current = pr2;
-
-              pr2.onaudioprocess = processor.onaudioprocess; // reuse logic below
-              src2.connect(pr2);
-              try { pr2.connect(ctx2.destination); } catch {}
-
-              setStatus("connected");
-            } catch (e) {
-              console.error("Fallback mic restart failed:", e);
-              setStatus("error");
-            }
-          });
-          return;
-        }
-
         if (isPausedRef.current) return;
         const sock = wsRef.current;
         if (!sock || sock.readyState !== WebSocket.OPEN) return;
-        const input = evt.inputBuffer.getChannelData(0);
-        const resampled = resampleBuffer(input, inputRateRef.current, 16000);
+
+        const ch0 = evt.inputBuffer.getChannelData(0);
+        let mono;
+        if (evt.inputBuffer.numberOfChannels > 1) {
+          const ch1 = evt.inputBuffer.getChannelData(1);
+          mono = new Float32Array(ch0.length);
+          for (let i = 0; i < ch0.length; i++) mono[i] = 0.5 * (ch0[i] + ch1[i]);
+        } else {
+          mono = ch0;
+        }
+
+        const resampled = resampleBuffer(mono, inputRateRef.current, 16000);
         const pcm16 = floatTo16BitPCM(resampled);
         try {
           sock.send(pcm16.buffer);
         } catch {}
       };
 
-      source.connect(processor);
-      try {
-        // Don’t actually need to hear the mic; but some stacks require a sink
-        processor.connect(audioCtx.destination);
-      } catch {}
-
+      setStatus("connected");
     } catch (e) {
-      console.error("Mic setup error:", e);
+      console.error("Capture setup error:", e);
       try { wsRef.current?.close(); } catch {}
       wsRef.current = null;
       setStatus("error");
@@ -303,15 +346,20 @@ const statusColor = status !== "idle" ? "#4CAF50" : "#F44336";
     isPausedRef.current = true;
     setStatus("paused");
     try { wsRef.current?.send(JSON.stringify({ type: "pause" })); } catch {}
-    try { if (audioCtxRef.current?.state === "running") await audioCtxRef.current.suspend(); } catch {}
+    try {
+      if (audioCtxRef.current?.state === "running") await audioCtxRef.current.suspend();
+    } catch {}
   };
   const resume = async () => {
     if (status !== "paused") return;
-    try { if (audioCtxRef.current?.state === "suspended") await audioCtxRef.current.resume(); } catch {}
+    try {
+      if (audioCtxRef.current?.state === "suspended") await audioCtxRef.current.resume();
+    } catch {}
     isPausedRef.current = false;
     setStatus("connected");
     try { wsRef.current?.send(JSON.stringify({ type: "resume" })); } catch {}
   };
+
   const stop = async (keepWS = false) => {
     try {
       if (processorRef.current) {
@@ -319,13 +367,29 @@ const statusColor = status !== "idle" ? "#4CAF50" : "#F44336";
         processorRef.current.onaudioprocess = null;
         processorRef.current = null;
       }
+      if (mixSourceRef.current) {
+        try { mixSourceRef.current.disconnect(); } catch {}
+        mixSourceRef.current = null;
+      }
       if (sourceRef.current) {
         try { sourceRef.current.disconnect(); } catch {}
         sourceRef.current = null;
       }
+      if (micGainRef.current) {
+        try { micGainRef.current.disconnect(); } catch {}
+        micGainRef.current = null;
+      }
+      if (sysGainRef.current) {
+        try { sysGainRef.current.disconnect(); } catch {}
+        sysGainRef.current = null;
+      }
       if (mediaRef.current) {
         mediaRef.current.getTracks().forEach((t) => t.stop());
         mediaRef.current = null;
+      }
+      if (sysStreamRef.current) {
+        sysStreamRef.current.getTracks().forEach((t) => t.stop());
+        sysStreamRef.current = null;
       }
       if (audioCtxRef.current) {
         try { await audioCtxRef.current.close(); } catch {}
@@ -334,7 +398,6 @@ const statusColor = status !== "idle" ? "#4CAF50" : "#F44336";
     } finally {
       isPausedRef.current = false;
     }
-    //* {--------------------------------------------------- ABOVE}
     if (!keepWS) {
       const ws = wsRef.current;
       if (ws && ws.readyState === WebSocket.OPEN) {
@@ -349,7 +412,9 @@ const statusColor = status !== "idle" ? "#4CAF50" : "#F44336";
   const askAI = () => {
     const text = lastNWords(`${finalText} ${partialText}`, 100);
     setAiAnswer("…thinking…");
-    try { wsRef.current?.send(JSON.stringify({ type: "ask_ai", text })); } catch (e) {
+    try {
+      wsRef.current?.send(JSON.stringify({ type: "ask_ai", text }));
+    } catch (e) {
       console.error(e);
     }
   };
@@ -360,7 +425,6 @@ const statusColor = status !== "idle" ? "#4CAF50" : "#F44336";
       const info = await window.electronAPI.getUnderlayCropInfo();
       const { sourceId, crop } = info;
 
-      // eslint-disable-next-line no-undef
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: false,
         video: {
@@ -376,7 +440,7 @@ const statusColor = status !== "idle" ? "#4CAF50" : "#F44336";
       await video.play();
       await new Promise((resolve) => {
         if (video.readyState >= 2) resolve();
-        else video.onloadeddata = () => resolve();
+        else (video.onloadeddata = () => resolve());
       });
 
       const canvas = document.createElement("canvas");
@@ -409,7 +473,10 @@ const statusColor = status !== "idle" ? "#4CAF50" : "#F44336";
     if (!ocrBusy) return;
     ocrCanceledRef.current = true;
     try { ocrAbortRef.current?.abort(); } catch {}
-    if (ocrTimerRef.current) { clearTimeout(ocrTimerRef.current); ocrTimerRef.current = null; }
+    if (ocrTimerRef.current) {
+      clearTimeout(ocrTimerRef.current);
+      ocrTimerRef.current = null;
+    }
     setOcrBusy(false);
     setFinalText((p) => p + (p.endsWith("\n") ? "" : "\n") + "[OCR canceled]\n");
   };
@@ -437,32 +504,36 @@ const statusColor = status !== "idle" ? "#4CAF50" : "#F44336";
       const text = await ocrImageDataUrl(shots[0], { signal: controller.signal });
       if (ocrCanceledRef.current) return;
       const stamped = text ? text : "[OCR returned empty text]";
-      setFinalText((p) =>
-        p + (p.endsWith("\n") ? "" : "\n") + "Screenshot of problem\n" + stamped + "\n"
-      );
+      setFinalText((p) => p + (p.endsWith("\n") ? "" : "\n") + "Screenshot of problem\n" + stamped + "\n");
     } catch (err) {
       if (ocrCanceledRef.current || err?.name === "AbortError") {
         setFinalText((p) => p + (p.endsWith("\n") ? "" : "\n") + "[OCR aborted]\n");
       } else {
         console.error(err);
-        setFinalText((p) =>
-          p + (p.endsWith("\n") ? "" : "\n") + "[OCR FAILED] " + (err?.message || "Unknown error") + "\n"
+        setFinalText(
+          (p) => p + (p.endsWith("\n") ? "" : "\n") + "[OCR FAILED] " + (err?.message || "Unknown error") + "\n"
         );
       }
     } finally {
-      if (ocrTimerRef.current) { clearTimeout(ocrTimerRef.current); ocrTimerRef.current = null; }
+      if (ocrTimerRef.current) {
+        clearTimeout(ocrTimerRef.current);
+        ocrTimerRef.current = null;
+      }
       ocrAbortRef.current = null;
       setOcrBusy(false);
     }
   };
 
   const clearImage = () => setShots((prev) => prev.slice(1));
-  const clearHistory = () => { setFinalText(""); setPartialText(""); };
+  const clearHistory = () => {
+    setFinalText("");
+    setPartialText("");
+  };
 
   const isRecording = status === "connected";
   const isPaused = status === "paused";
 
-  // ---------- RESIZE BUTTON (like Excalidraw handle) ----------
+  // ---------- RESIZE BUTTON ----------
   const draggingRef = useRef(false);
   const startMouseRef = useRef({ x: 0, y: 0 });
   const startSizeRef = useRef({ w: 0, h: 0 });
@@ -476,7 +547,6 @@ const statusColor = status !== "idle" ? "#4CAF50" : "#F44336";
     window.addEventListener("mousemove", onResizeMove);
     window.addEventListener("mouseup", onResizeEnd);
   };
-
   const onResizeMove = (e) => {
     if (!draggingRef.current) return;
     const dx = e.clientX - startMouseRef.current.x;
@@ -495,12 +565,14 @@ const statusColor = status !== "idle" ? "#4CAF50" : "#F44336";
       });
     }
   };
-
   const onResizeEnd = () => {
     draggingRef.current = false;
     window.removeEventListener("mousemove", onResizeMove);
     window.removeEventListener("mouseup", onResizeEnd);
-    if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = 0; }
+    if (rafRef.current) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = 0;
+    }
   };
 
   // Add manual text to transcript
@@ -512,7 +584,7 @@ const statusColor = status !== "idle" ? "#4CAF50" : "#F44336";
   };
   const onManualKeyDown = (e) => {
     if (e.key === "Enter") {
-      e.preventDefault(); // keep it single-line submit
+      e.preventDefault();
       appendManual();
     }
   };
@@ -540,13 +612,13 @@ const statusColor = status !== "idle" ? "#4CAF50" : "#F44336";
         flexDirection: "column",
       }}
     >
-      {/* DRAG PILL — the ONLY drag region */}
+      {/* DRAG PILL */}
       <div
         style={{
           position: "absolute",
           top: 0,
           right: 8,
-          width: 140,
+          width: 80,
           height: 30,
           borderRadius: 8,
           background: "rgba(255,255,255,0.08)",
@@ -612,10 +684,10 @@ const statusColor = status !== "idle" ? "#4CAF50" : "#F44336";
             Ask AI
           </button>
           <button className="btn" style={{ cursor: "default", margin: 0 }} onClick={captureUnderOverlay}>
-            Capture Under
+            Capture
           </button>
           <button className="btn" style={{ cursor: "default", margin: 0 }} onClick={ocrCurrentImage} disabled={!shots[0] || ocrBusy}>
-            {ocrBusy ? "OCR…" : "OCR Image"}
+            {ocrBusy ? "OCR…" : "OCR"}
           </button>
           {ocrBusy && (
             <button className="btn" style={{ cursor: "default", margin: 0 }} onClick={cancelOcr}>
@@ -630,124 +702,111 @@ const statusColor = status !== "idle" ? "#4CAF50" : "#F44336";
           </button>
 
           {/* Mic selector */}
-           <select
-  value={selectedInputId}
-  onChange={(e) => setSelectedInputId(e.target.value)}
-  style={{
-    width: "140px",
-    maxWidth: "140px",
-    background: "rgba(255,255,255,0.06)",
-    border: "1px solid rgba(255,255,255,0.25)",
-    color: "#d9cbcbff",
-    borderRadius: 6,
-    padding: "6px 8px",
-    outline: "none",
-    WebkitAppRegion: "no-drag",
-    cursor: "default",
-    whiteSpace: "nowrap",
-    overflow: "hidden",
-    textOverflow: "ellipsis",
-  }}
-  title="Select microphone (Bluetooth headset recommended)"
->
-  {inputDevices.map((d) => {
-    const label = d.label || `Mic ${d.deviceId.slice(0, 6)}`;
-    const truncatedLabel = label.length > 18 ? label.slice(0, 18) + '...' : label;
-    
-    return (
-      <option key={d.deviceId} value={d.deviceId} title={label}>
-        {truncatedLabel}
-      </option>
-    );
-  })}
-</select>
+          {/* <select
+            value={selectedInputId}
+            onChange={(e) => setSelectedInputId(e.target.value)}
+            style={{
+              width: "140px",
+              maxWidth: "140px",
+              background: "rgba(255,255,255,0.06)",
+              border: "1px solid rgba(255,255,255,0.25)",
+              color: "#d9cbcbff",
+              borderRadius: 6,
+              padding: "6px 8px",
+              outline: "none",
+              WebkitAppRegion: "no-drag",
+              cursor: "default",
+              whiteSpace: "nowrap",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+            }}
+            title="Select microphone (Bluetooth headset recommended)"
+          >
+            {inputDevices.map((d) => {
+              const label = d.label || `Mic ${d.deviceId.slice(0, 6)}`;
+              const truncatedLabel = label.length > 18 ? label.slice(0, 18) + "..." : label;
+              return (
+                <option key={d.deviceId} value={d.deviceId} title={label}>
+                  {truncatedLabel}
+                </option>
+              );
+            })}
+          </select> */}
 
-
-          <button
+          {/* <button
             className="btn"
             style={{ cursor: "default", margin: 0 }}
             onClick={() => setDeviceRefreshKey((k) => k + 1)}
             title="Refresh devices"
           >
             Refresh Mics
-          </button>
-          {/* ------------------------------------------------------------------ */}
+          </button> */}
 
-          {/* BlueTooth issue on top */}
-
-        
-
-
-         <div
-  style={{
-    display: "flex",            // Use Flexbox to align items horizontally
-    alignItems: "center",       // Vertically center everything
-    padding: 0,                 // Zero padding
-    margin: 0,                  // Zero margin to occupy min space
-    gap: "6px",                 // Small, uniform gap between the three items
-    // Enforce minimal space usage across the whole container
-    fontSize: "10px",
-    lineHeight: 1,
-    whiteSpace: "nowrap",
-  }}
->
-  {/* A. Status Circle (from the original <p> status indicator) */}
-  <span
-    title={`Status: ${status}`} // Add a title for context
-    style={{
-      display: 'inline-block',
-      width: '6px',        // Size of the circle
-      height: '6px',
-      borderRadius: '50%', // Makes it a circle
-      backgroundColor: statusColor, // Dynamic color (Green or Red)
-    }}
-  />
-
-  {/* B. Toggle Dock Button (compact dot) */}
-  <span
-    className="btn"
-    onClick={() => window.electronAPI?.toggleDock?.()}
-    title="Toggle Dock Visibility"
-    style={{ 
-      cursor: "default", 
-      margin: 0,
-      padding: 0,
-      lineHeight: 0,
-      display: 'inline-block',
-      width: '6px',
-      height: '6px',
-      borderRadius: '50%',
-      backgroundColor: 'rgba(255, 255, 255, 0.4)', 
-      fontSize: 0, // Ensure no text space is reserved
-    }}
-  />
-  
-  {/* C. Include System Audio Checkbox/Label (compact) */}
-  <label 
-    className="no-drag" 
-    style={{ 
-      display: "inline-flex", 
-      gap: 4,               // Small gap inside the label
-      alignItems: "center", 
-      padding: 0,
-      margin: 0,
-      fontSize: "10px",     // Extra small text
-      lineHeight: 1,
-      whiteSpace: "nowrap",
-      userSelect: "none",
-      color: "#d9cbcbff",
-    }}
-  >
-    <input
-      type="checkbox"
-      checked={includeSystemAudio}
-      onChange={e => setIncludeSystemAudio(e.target.checked)}
-      style={{ margin: 0 }} 
-    />
-    System audio
-  </label>
-</div>
-</div>
+          {/* Status + system audio toggle */}
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              padding: 0,
+              margin: 0,
+              gap: "6px",
+              fontSize: "10px",
+              lineHeight: 1,
+              whiteSpace: "nowrap",
+            }}
+          >
+            <span
+              title={`Status: ${status}`}
+              style={{
+                display: "inline-block",
+                width: "6px",
+                height: "6px",
+                borderRadius: "50%",
+                backgroundColor: statusColor,
+              }}
+            />
+            <span
+              className="btn"
+              onClick={() => window.electronAPI?.toggleDock?.()}
+              title="Toggle Dock Visibility"
+              style={{
+                cursor: "default",
+                margin: 0,
+                padding: 0,
+                lineHeight: 0,
+                display: "inline-block",
+                width: "6px",
+                height: "6px",
+                borderRadius: "50%",
+                backgroundColor: "rgba(255, 255, 255, 0.4)",
+                fontSize: 0,
+              }}
+            />
+            {/* <label
+              className="no-drag"
+              style={{
+                display: "inline-flex",
+                gap: 4,
+                alignItems: "center",
+                padding: 0,
+                margin: 0,
+                fontSize: "10px",
+                lineHeight: 1,
+                whiteSpace: "nowrap",
+                userSelect: "none",
+                color: "#d9cbcbff",
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={includeSystemAudio}
+                onChange={(e) => setIncludeSystemAudio(e.target.checked)}
+                style={{ margin: 0 }}
+              />
+              System audio
+            </label> */}
+          </div>
+        </div>
 
         <button
           className={`toggle ${showTranscript ? "on" : "off"}`}
@@ -775,7 +834,9 @@ const statusColor = status !== "idle" ? "#4CAF50" : "#F44336";
         {/* Left: User transcript */}
         {showTranscript && (
           <div className="pane" style={{ display: "grid", gridTemplateRows: "auto 1fr auto", minHeight: 0, margin: 0 }}>
-            <div className="pane-title" style={{ padding: 4, margin: 0 }}>Transcript</div>
+            <div className="pane-title" style={{ padding: 4, margin: 0 }}>
+              Transcript
+            </div>
             <div className="pane-body" style={{ overflow: "auto", padding: 4, margin: 0 }}>
               <pre className="pre-area" style={{ whiteSpace: "pre-wrap", margin: 0 }}>
                 {finalText}
@@ -821,7 +882,9 @@ const statusColor = status !== "idle" ? "#4CAF50" : "#F44336";
 
         {/* Right: AI Answer */}
         <div className="pane" style={{ display: "grid", gridTemplateRows: "auto 1fr", minHeight: 0, margin: 0 }}>
-          <div className="pane-title" style={{ padding: 4, margin: 0 }}>AI Answer</div>
+          <div className="pane-title" style={{ padding: 4, margin: 0 }}>
+            AI Answer
+          </div>
           <div className="pane-body" style={{ overflow: "auto", padding: 4, margin: 0 }}>
             <pre className="pre-area" style={{ whiteSpace: "pre-wrap", margin: 0 }}>
               {aiAnswer || "Press Ask AI to get an answer based on the last 100 words."}

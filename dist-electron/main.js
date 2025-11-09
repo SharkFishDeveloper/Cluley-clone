@@ -1,8 +1,6 @@
 import { app, globalShortcut, BrowserWindow, Menu, ipcMain, screen, desktopCapturer } from "electron";
-import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-createRequire(import.meta.url);
 const __dirname$1 = path.dirname(fileURLToPath(import.meta.url));
 const VITE_DEV_SERVER_URL = process.env["VITE_DEV_SERVER_URL"];
 process.env.APP_ROOT = path.join(__dirname$1, "..");
@@ -93,7 +91,7 @@ function createWindow() {
     // ← never show in taskbar
     focusable: true,
     show: true,
-    icon: path.join(process.env.VITE_PUBLIC, "electron-vite.svg"),
+    icon: path.join(process.env.VITE_PUBLIC, "notion.jpg"),
     webPreferences: {
       preload: path.join(__dirname$1, "preload.mjs"),
       contextIsolation: true,
