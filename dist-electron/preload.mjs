@@ -2,7 +2,8 @@
 const electron = require("electron");
 electron.contextBridge.exposeInMainWorld("electronAPI", {
   getUnderlayCropInfo: () => electron.ipcRenderer.invoke("get-underlay-crop-info"),
-  resizeWindow: (w, h) => electron.ipcRenderer.invoke("resize-window", { w, h })
+  resizeWindow: (w, h) => electron.ipcRenderer.invoke("resize-window", { w, h }),
+  toggleDock: () => electron.ipcRenderer.invoke("dock:toggle")
 });
 electron.contextBridge.exposeInMainWorld("ipc", {
   on: (channel, listener) => electron.ipcRenderer.on(channel, (_e, ...args) => listener(...args)),

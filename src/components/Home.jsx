@@ -387,12 +387,11 @@
             WebkitAppRegion: "drag",
             cursor: "default",
             zIndex: 1000,
-            pointerEvents: "auto"
+          pointerEvents: "auto"
           }}
           title=""
         />
 
-        {/* RESIZE HANDLE BUTTON (no arrow cursor) */}
         <button
           onMouseDown={onResizeStart}
           title="Resize"
@@ -462,6 +461,14 @@
             <span className="status" style={{ fontSize: 10, display: "flex", alignItems: "center", margin: 0 }}>
               {status.charAt(0).toUpperCase() + status.slice(1, 5)}
             </span>
+            
+            {/* TOGGLE DOCK */}
+            <button
+              className="btn"
+              onClick={() => window.electronAPI.toggleDock()}
+              style={{ cursor: "default" }}
+            >
+            </button>
           </div>
 
           <button
